@@ -19,6 +19,7 @@ Output in Simplified Chinese:
 - 作者：{author}
 - 时长：{duration}
 - 文稿来源：{subtitle_or_transcription}
+- 分析范围：仅基于字幕/音频转写，不包含 OCR、截图或画面理解。
 
 ## 摘要
 用 1 段话概括视频主张、论证路径、关键结论。避免逐字摘抄，改写成清晰书面语。

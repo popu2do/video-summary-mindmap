@@ -3,6 +3,8 @@
 Bilibili/YouTube/local-media workflow for generating:
 
 - `transcript.txt`
+- `transcript_segments.json`
+- `transcript_timed.txt`
 - `summary.md`
 - `mindmap.mmd`
 - optional LLM-polished `summary_refined.md`
@@ -22,6 +24,8 @@ The bundled Codex skill lives at:
 - Mermaid mind map generation
 - Optional OpenAI-compatible LLM semantic refinement
 - Optional reuse of an existing `transcript.txt`
+- `--language auto|zh|en|ja` for local transcription; default is `auto`
+- `--domain general|zh-social` for opt-in Chinese social-course terminology
 - Optional `.local.env` loading from the current working directory
 
 ## Install
@@ -83,8 +87,10 @@ Generate semantic polished output:
 Generate course/livestream notes:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/course.mp4" --reuse-transcript --template refined --content-type lecture --llm-refine
+& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/course.mp4" --reuse-transcript --template refined --content-type lecture --domain zh-social --language zh --llm-refine
 ```
+
+Local transcription defaults to automatic language detection. Keep `--language zh` for Chinese courses when fixed-language recognition gives better terminology stability.
 
 Analyze a local media file:
 
@@ -116,8 +122,14 @@ mindmap_refined.mmd
 summary.md
 summary_refined.md
 transcript.txt
+transcript_segments.json
+transcript_timed.txt
 transcription.json
 ```
+
+`summary.md` is the offline extractive draft. It is based only on subtitles or audio transcription and does not include OCR, screenshots, or visual scene understanding. When `--llm-refine` is enabled, use `summary_refined.md` as the high-quality delivery file.
+
+For long lecture transcripts, `--llm-refine` summarizes chronological chunks first and then merges those chunk summaries into the final delivery file. Intermediate chunk summaries are written to `summary_chunks.json`.
 
 Large media and generated outputs are ignored by Git.
 

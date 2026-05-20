@@ -20,6 +20,7 @@ Output in Simplified Chinese. Produce clean course notes, not a short-video high
 - 作者：{author}
 - 时长：{duration}
 - 文稿来源：{subtitle_or_transcription}
+- 分析范围：仅基于字幕/音频转写，不包含 OCR、截图或画面理解。
 
 ## 课程定位
 用 1 段话说明这节课解决什么问题、属于什么模块、学习后应该掌握什么。

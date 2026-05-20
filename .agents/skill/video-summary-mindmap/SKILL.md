@@ -10,6 +10,8 @@ description: Summarize Bilibili, YouTube, and local video or audio into transcri
 Use `scripts/video_summary.py` for repeatable video analysis. It accepts a Bilibili or YouTube URL, or a local media path, then writes:
 
 - `transcript.txt`
+- `transcript_segments.json`
+- `transcript_timed.txt`
 - `summary.md`
 - `mindmap.mmd`
 - `metadata.json`
@@ -41,12 +43,21 @@ python "workflow/video_summary.py" "VIDEO_URL"
 Use these modes based on speed and quality requirements:
 
 - Fast draft: `--transcribe-engine local --local-whisper-model tiny --template compact`
-- Better local: `--transcribe-engine local --local-whisper-model small --template refined`
-- Review pass: rerun with `--reuse-transcript --template refined` after editing `transcript.txt`
+- Fast refined draft: `--template refined`
+- Better local: `--transcribe-engine local --local-whisper-model small --language zh --template refined`
+- Course/livestream notes: `--content-type lecture --llm-refine --domain zh-social --language zh`
+- Review pass: rerun with `--reuse-transcript --llm-refine` after editing `transcript.txt`
 - Best quality: produce transcript with a stronger model or OpenAI transcription, then run `--llm-refine` to generate `summary_refined.md` and `mindmap_refined.mmd`
-- Lecture/livestream notes: use `--content-type lecture --llm-refine`; the script sends a shorter transcript window by default to avoid provider timeouts
 
-The built-in offline summary is extractive. It is reliable and cheap, but it cannot fully replace a language model for polished abstracts, accurate terminology explanations, or insight-level chapter titles.
+Local transcription defaults to `--language auto`. Keep `--language zh` for Chinese courses when fixed-language recognition gives better terminology stability.
+
+The built-in `summary.md` is an offline extractive draft. It is reliable and cheap, but it cannot fully replace a language model for polished abstracts, accurate terminology explanations, or insight-level chapter titles. Treat `summary_refined.md` as the high-quality delivery file when `--llm-refine` is enabled.
+
+For long lecture transcripts, `--llm-refine` summarizes chronological chunks first and then merges those chunk summaries into the final `summary_refined.md`. This avoids dropping the back half of the video while keeping each provider request bounded. Completed chunk summaries are saved to `summary_chunks.json` after each chunk and reused on rerun.
+
+Use `--domain general` by default for technical videos, business interviews, English media, and mixed-topic content. Use `--domain zh-social` only for Chinese relationship/social-skill courses where the bundled terminology helps correct ASR and extract terms.
+
+Timed outputs are generated from VTT, SRT, common JSON subtitle formats, local ASR segments, or timed transcript lines such as `[00:10] text`. ASS/SSA/XML subtitles currently fall back to plain transcript text without segment timestamps.
 
 ## LLM Refinement
 
@@ -89,7 +100,7 @@ Fallback transcription requires:
 - the bundled Codex `transcribe` skill script, or `TRANSCRIBE_CLI` pointing to an equivalent CLI
 - `ffmpeg` available on `PATH` for audio extraction
 
-Install `faster-whisper` in a compatible Python environment for local transcription. The script uses CPU `faster-whisper` with `--transcribe-engine local --local-whisper-model tiny` by default. Use `--transcribe-engine openai` only when the OpenAI transcription SDK path is configured and the media size is supported.
+Install `faster-whisper` in a compatible Python environment for local transcription. The script uses CPU `faster-whisper` with `--transcribe-engine local --local-whisper-model tiny --language auto` by default. Use `--transcribe-engine openai` only when the OpenAI transcription SDK path is configured and the media size is supported.
 
 Do not ask users to paste API keys into chat. Read keys only from local environment variables.
 
