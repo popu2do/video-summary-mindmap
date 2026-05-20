@@ -1,53 +1,74 @@
 # Video Summary Mindmap
 
-Bilibili/YouTube/local-media workflow for generating:
+Generate transcripts, structured Markdown notes, and Mermaid mind maps from
+Bilibili videos, YouTube videos, and local media files.
 
-- `transcript.txt`
-- `transcript_segments.json`
-- `transcript_timed.txt`
-- `summary.md`
-- `mindmap.mmd`
-- optional LLM-polished `summary_refined.md`
-- optional LLM-polished `mindmap_refined.mmd`
+The workflow is subtitle-first and transcription-backed: it tries to reuse
+available subtitles, falls back to local audio transcription when needed, and
+can optionally call an OpenAI-compatible LLM to produce polished course notes or
+video summaries.
 
-The bundled Codex skill lives at:
-
-```text
-.agents/skill/video-summary-mindmap/
-```
+> Scope: summaries are based only on subtitles or audio transcription. The tool
+> does not perform OCR, screenshot analysis, or visual scene understanding.
 
 ## Features
 
-- Subtitle-first extraction through `yt-dlp`
-- Local audio transcription fallback with `faster-whisper`
-- Compact and refined Markdown summary templates
-- Mermaid mind map generation
-- Optional OpenAI-compatible LLM semantic refinement
-- Optional reuse of an existing `transcript.txt`
-- `--language auto|zh|en|ja` for local transcription; default is `auto`
-- `--domain general|zh-social` for opt-in Chinese social-course terminology
-- Optional `.local.env` loading from the current working directory
+- Extract subtitles with `yt-dlp` when platform captions are available.
+- Transcribe local audio with `faster-whisper` when subtitles are missing or
+  explicitly ignored.
+- Generate deterministic offline outputs: `summary.md`, `mindmap.mmd`, and
+  transcript artifacts.
+- Optionally generate LLM-polished outputs: `summary_refined.md` and
+  `mindmap_refined.mmd`.
+- Reuse existing transcripts for fast iteration with `--reuse-transcript`.
+- Preserve timestamped transcript segments for chaptering and long-video
+  chunking.
+- Support local transcription languages with `--language auto|zh|en|ja`
+  (`auto` by default).
+- Support domain-specific terminology with `--domain general|zh-social`.
+- Load local configuration from `.local.env` without committing secrets.
 
-## Install
+## Repository Layout
 
-Use Python 3.12 for best compatibility with `faster-whisper`.
+```text
+.
+├── .agents/skill/video-summary-mindmap/
+│   ├── references/          # prompts and domain terminology
+│   ├── scripts/             # deterministic workflow implementation
+│   ├── tests/               # skill-level regression tests
+│   └── SKILL.md             # Codex skill instructions
+├── tests/                   # repository-level regression tests
+├── workflow/video_summary.py # thin wrapper around the skill script
+├── .env.example
+├── requirements.txt
+└── README.md
+```
+
+## Requirements
+
+- Python 3.12 is recommended for `faster-whisper` compatibility.
+- `ffmpeg` must be available on `PATH` when audio download or transcription is
+  needed.
+- Network access is required for online videos, model downloads, and optional
+  LLM refinement.
+
+Install Python dependencies:
 
 ```powershell
 python -m venv .venv
 & ".venv/Scripts/python.exe" -m pip install -r requirements.txt
 ```
 
-`ffmpeg` must be available on `PATH` when audio download/transcription is needed.
+## Configuration
 
-## Configure
-
-Copy the example env file and fill your local key:
+Copy the example environment file:
 
 ```powershell
 Copy-Item ".env.example" ".local.env"
 ```
 
-`.local.env` is ignored by Git.
+`.local.env` is ignored by Git and is loaded automatically from the current
+working directory.
 
 ```env
 OPENAI_API_KEY=
@@ -56,9 +77,21 @@ OPENAI_MODEL=gpt-5.4-mini
 OPENAI_API_KIND=chat
 ```
 
-For OpenAI-compatible providers, set `OPENAI_BASE_URL`, `OPENAI_MODEL`, and `OPENAI_API_KIND=chat` as needed.
+For OpenAI-compatible providers, set:
 
-## Usage
+- `OPENAI_API_KEY`: provider API key.
+- `OPENAI_BASE_URL`: compatible API base URL.
+- `OPENAI_MODEL`: refinement model.
+- `OPENAI_API_KIND`: `responses` or `chat`.
+
+Optional transcription defaults:
+
+- `TRANSCRIBE_ENGINE`: `local` or `openai`; default is `local`.
+- `LOCAL_WHISPER_MODEL`: default is `tiny`.
+- `TRANSCRIBE_LANGUAGE`: `auto`, `zh`, `en`, or `ja`; invalid values fall back
+  to `auto`.
+
+## Quick Start
 
 Fast local draft:
 
@@ -66,36 +99,28 @@ Fast local draft:
 & ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --transcribe-engine local --local-whisper-model tiny --template compact
 ```
 
-Better local output:
+Better local transcription quality:
 
 ```powershell
 & ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --transcribe-engine local --local-whisper-model small --template refined
 ```
 
-Regenerate summary from an existing transcript:
-
-```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --reuse-transcript --template refined
-```
-
-Generate semantic polished output:
+Generate polished output with an OpenAI-compatible LLM:
 
 ```powershell
 & ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --reuse-transcript --template refined --llm-refine
 ```
 
-Generate course/livestream notes:
+Generate Chinese course or livestream notes:
 
 ```powershell
 & ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/course.mp4" --reuse-transcript --template refined --content-type lecture --domain zh-social --language zh --llm-refine
 ```
 
-Local transcription defaults to automatic language detection. Keep `--language zh` for Chinese courses when fixed-language recognition gives better terminology stability.
-
 Analyze a local media file:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/example.mp4" --transcribe-engine local --local-whisper-model tiny --template refined --llm-refine
+& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/example.mp4" --transcribe-engine local --local-whisper-model small --language auto --template refined
 ```
 
 Use browser cookies when the platform requires login:
@@ -104,9 +129,20 @@ Use browser cookies when the platform requires login:
 & ".venv/Scripts/python.exe" "workflow/video_summary.py" "VIDEO_URL" --cookies-from-browser edge --template refined
 ```
 
-## Output
+## Recommended Workflow
 
-Outputs are written under:
+1. Run once with subtitle extraction or local transcription.
+2. Inspect and optionally edit `transcript.txt`.
+3. Rerun with `--reuse-transcript`.
+4. Add `--llm-refine` when you need the polished delivery files.
+
+For Chinese course content, `--language zh` can be more stable than automatic
+detection. For mixed-language, English, or Japanese videos, keep the default
+`--language auto`.
+
+## Outputs
+
+Outputs are written to:
 
 ```text
 workflow/output/<video-id>/
@@ -115,54 +151,116 @@ workflow/output/<video-id>/
 Common files:
 
 ```text
-audio.mp3
 metadata.json
-mindmap.mmd
-mindmap_refined.mmd
-summary.md
-summary_refined.md
+transcription.json
 transcript.txt
 transcript_segments.json
 transcript_timed.txt
-transcription.json
+summary.md
+mindmap.mmd
+summary_refined.md
+mindmap_refined.mmd
+summary_chunks.json
+audio.mp3
 ```
 
-`summary.md` is the offline extractive draft. It is based only on subtitles or audio transcription and does not include OCR, screenshots, or visual scene understanding. When `--llm-refine` is enabled, use `summary_refined.md` as the high-quality delivery file.
+Output roles:
 
-For long lecture transcripts, `--llm-refine` summarizes chronological chunks first and then merges those chunk summaries into the final delivery file. Intermediate chunk summaries are written to `summary_chunks.json`.
+- `transcript.txt`: normalized transcript used by summaries.
+- `transcript_segments.json`: timestamped transcript segments when available.
+- `transcript_timed.txt`: readable timestamped transcript.
+- `summary.md`: deterministic offline extractive draft.
+- `mindmap.mmd`: deterministic Mermaid mind map.
+- `summary_refined.md`: optional LLM-polished delivery file.
+- `mindmap_refined.mmd`: Mermaid extracted from the polished summary.
+- `summary_chunks.json`: resumable intermediate chunk summaries for long
+  lecture refinement.
+- `metadata.json`: source metadata and analysis scope.
 
-Large media and generated outputs are ignored by Git.
+## CLI Options
 
-## Privacy
+Frequently used options:
+
+```text
+--force-transcribe             Ignore subtitles and transcribe audio.
+--reuse-transcript             Rebuild outputs from an existing transcript.txt.
+--transcribe-engine local      Use local faster-whisper transcription.
+--local-whisper-model small    Choose faster-whisper model size.
+--language auto|zh|en|ja       Choose or auto-detect transcription language.
+--template compact|refined     Choose deterministic summary template.
+--content-type auto|video|lecture
+--domain general|zh-social
+--llm-refine                   Generate semantic polished outputs.
+--llm-api responses|chat
+--use-codex-config             Reuse non-secret Codex model/base URL settings.
+```
+
+Run the script with `--help` for the full argument list.
+
+## Testing
+
+Run repository tests:
+
+```powershell
+python -m unittest "tests/test_video_summary.py"
+```
+
+Run skill tests directly:
+
+```powershell
+python ".agents/skill/video-summary-mindmap/tests/test_video_summary.py"
+```
+
+Compile-check the workflow script and tests:
+
+```powershell
+python -m py_compile ".agents/skill/video-summary-mindmap/scripts/video_summary.py" "tests/test_video_summary.py"
+```
+
+## Privacy and Safety
 
 Do not commit:
 
 - `.local.env`
-- API keys
+- API keys or GitHub tokens
 - cookies
 - downloaded media
 - private transcripts
 - generated output folders
 - Codex auth files
 
-This repository intentionally excludes local test outputs, virtual environments, downloaded reference repositories, and user-provided private notes.
+Large media files, generated outputs, virtual environments, and local private
+notes should stay outside version control.
 
-## Codex Skill
+## Limitations
 
-The skill metadata and workflow instructions are in:
+- This is not a multimodal video-understanding tool. It does not inspect frames,
+  OCR on-screen text, or infer information from visuals.
+- Local transcription quality depends on audio quality, speaker clarity,
+  language choice, and the selected Whisper model.
+- `summary.md` is deterministic and cheap, but it is not a substitute for
+  human review or LLM polishing.
+- Long-video LLM refinement can still fail if the provider rejects requests or
+  credentials are misconfigured, though transient `429` and `5xx` failures are
+  retried.
 
-```text
-.agents/skill/video-summary-mindmap/SKILL.md
-```
+## Prior Art and References
 
-The deterministic workflow script is:
+This project was informed by public video summarization and transcription
+projects, especially:
 
-```text
-.agents/skill/video-summary-mindmap/scripts/video_summary.py
-```
+- [BibiGPT](https://github.com/JimmyLv/BibiGPT-v1): AI audio/video summarization
+  for Bilibili, YouTube, local media, podcasts, lectures, and related learning
+  content.
+- [youtube-transcriber](https://github.com/lifesized/youtube-transcriber):
+  local-first YouTube and podcast transcription workflow.
+- [AI-Video-Transcriber](https://github.com/wendy7756/AI-Video-Transcriber):
+  multi-platform video and podcast transcription and summarization tool.
 
-The root wrapper is:
+These projects helped shape the workflow design, subtitle/transcription
+handling, prompt structure, and output contract.
 
-```text
-workflow/video_summary.py
-```
+## License
+
+No license has been declared yet. Add a `LICENSE` file before distributing or
+accepting external contributions.
