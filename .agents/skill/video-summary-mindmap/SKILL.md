@@ -40,8 +40,8 @@ python "workflow/video_summary.py" "VIDEO_URL"
 
 Use these modes based on speed and quality requirements:
 
-- Fast draft: `--local-whisper-model tiny --template compact`
-- Better local: `--local-whisper-model small --template refined`
+- Fast draft: `--transcribe-engine local --local-whisper-model tiny --template compact`
+- Better local: `--transcribe-engine local --local-whisper-model small --template refined`
 - Review pass: rerun with `--reuse-transcript --template refined` after editing `transcript.txt`
 - Best quality: produce transcript with a stronger model or OpenAI transcription, then run `--llm-refine` to generate `summary_refined.md` and `mindmap_refined.mmd`
 
@@ -88,7 +88,7 @@ Fallback transcription requires:
 - the bundled Codex `transcribe` skill script, or `TRANSCRIBE_CLI` pointing to an equivalent CLI
 - `ffmpeg` available on `PATH` for audio extraction
 
-If `OPENAI_API_KEY` is not set, install `faster-whisper` in a compatible Python environment. The script uses CPU `faster-whisper` with `--local-whisper-model tiny` by default.
+Install `faster-whisper` in a compatible Python environment for local transcription. The script uses CPU `faster-whisper` with `--transcribe-engine local --local-whisper-model tiny` by default. Use `--transcribe-engine openai` only when the OpenAI transcription SDK path is configured and the media size is supported.
 
 Do not ask users to paste API keys into chat. Read keys only from local environment variables.
 

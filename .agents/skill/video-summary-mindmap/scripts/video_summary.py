@@ -243,8 +243,8 @@ def download_audio(source: str, out_dir: Path, cookies_from_browser: str | None)
     return audio
 
 
-def transcribe_audio(audio: Path, out_dir: Path, local_model: str) -> str:
-    if not os.environ.get("OPENAI_API_KEY"):
+def transcribe_audio(audio: Path, out_dir: Path, local_model: str, engine: str) -> str:
+    if engine == "local" or not os.environ.get("OPENAI_API_KEY"):
         return transcribe_audio_local(audio, out_dir, local_model)
     cli = Path(os.environ.get("TRANSCRIBE_CLI", "transcribe_diarize.py"))
     if not cli.exists():
@@ -764,6 +764,7 @@ def main() -> None:
     parser.add_argument("--out-root", default="workflow/output", help="输出根目录")
     parser.add_argument("--cookies-from-browser", help="需要登录态时读取浏览器 Cookie，例如 chrome、edge、firefox")
     parser.add_argument("--force-transcribe", action="store_true", help="忽略字幕，强制下载音频并转写")
+    parser.add_argument("--transcribe-engine", choices=("local", "openai"), default=os.environ.get("TRANSCRIBE_ENGINE", "local"), help="转写引擎：local 使用 faster-whisper，openai 使用 Codex transcribe skill")
     parser.add_argument("--local-whisper-model", default=os.environ.get("LOCAL_WHISPER_MODEL", "tiny"), help="无 OPENAI_API_KEY 时使用的 faster-whisper 模型")
     parser.add_argument("--reuse-transcript", action="store_true", help="如果输出目录已有 transcript.txt，则只重新生成摘要和脑图")
     parser.add_argument("--template", choices=("compact", "refined"), default="refined", help="摘要模板：compact 简版，refined 精校版")
@@ -798,7 +799,7 @@ def main() -> None:
 
     if not transcript:
         audio = download_audio(source, out_dir, args.cookies_from_browser)
-        transcript = transcribe_audio(audio, out_dir, args.local_whisper_model)
+        transcript = transcribe_audio(audio, out_dir, args.local_whisper_model, args.transcribe_engine)
 
     if len(transcript.strip()) < 20:
         fail("转写文本过短，无法生成摘要。")

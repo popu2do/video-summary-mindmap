@@ -59,13 +59,13 @@ For OpenAI-compatible providers, set `OPENAI_BASE_URL`, `OPENAI_MODEL`, and `OPE
 Fast local draft:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --local-whisper-model tiny --template compact
+& ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --transcribe-engine local --local-whisper-model tiny --template compact
 ```
 
 Better local output:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --local-whisper-model small --template refined
+& ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --transcribe-engine local --local-whisper-model small --template refined
 ```
 
 Regenerate summary from an existing transcript:
@@ -142,4 +142,3 @@ The root wrapper is:
 ```text
 workflow/video_summary.py
 ```
-
