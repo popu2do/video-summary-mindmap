@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import io
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -124,6 +127,106 @@ class VideoSummaryTests(unittest.TestCase):
                 sys.modules["faster_whisper"] = original
         self.assertEqual(calls, [{"vad_filter": True}])
 
+    def test_default_language_is_auto_and_env_can_override(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.module.default_transcribe_language(), "auto")
+        with mock.patch.dict(os.environ, {"TRANSCRIBE_LANGUAGE": "zh"}, clear=True):
+            self.assertEqual(self.module.default_transcribe_language(), "zh")
+        with mock.patch.dict(os.environ, {"TRANSCRIBE_LANGUAGE": "chinese"}, clear=True):
+            self.assertEqual(self.module.default_transcribe_language(), "auto")
+
+    def test_outputs_include_analysis_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            transcript = "这是第一段足够长的字幕内容，用于生成摘要和范围提示。" * 4
+            self.module.write_outputs(
+                {"title": "测试视频", "uploader": "作者", "duration": 90},
+                "https://example.test/video",
+                out_dir,
+                transcript,
+                "zh",
+                "compact",
+            )
+            metadata = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
+            summary = (out_dir / "summary.md").read_text(encoding="utf-8")
+        self.assertEqual(metadata["analysis_basis"], "subtitle_or_audio_only")
+        self.assertIn("仅基于字幕/音频转写", summary)
+
+    def test_llm_prompt_declares_audio_only_basis(self) -> None:
+        prompt = self.module.build_llm_prompt(
+            title="标题",
+            source="https://example.test/video",
+            author="作者",
+            duration="00:01:00",
+            transcript="逐字稿",
+            subtitle_lang=None,
+            draft_summary="草稿",
+            content_type="video",
+        )
+        chunk_prompt = self.module.build_lecture_chunk_prompt(
+            title="标题",
+            source="https://example.test/video",
+            author="作者",
+            duration="00:01:00",
+            subtitle_lang=None,
+            chunk_index=1,
+            chunk_count=2,
+            chunk={"start": 0, "end": 10, "text": "分段逐字稿"},
+        )
+        self.assertIn("no OCR, screenshots, or visual scene understanding", prompt)
+        self.assertIn("no OCR, screenshots, or visual scene understanding", chunk_prompt)
+        self.assertIn("分析范围：仅基于字幕/音频转写", prompt)
+
+    def test_call_llm_retries_429_then_succeeds(self) -> None:
+        response = FakeResponse({"choices": [{"message": {"content": "成功"}}]})
+        error = self.http_error(429, "rate limit")
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=True), \
+                mock.patch.object(self.module.urllib.request, "urlopen", side_effect=[error, response]) as urlopen, \
+                mock.patch.object(self.module.time, "sleep") as sleep:
+            result = self.module.call_llm("prompt", "model", "chat")
+        self.assertEqual(result, "成功")
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    def test_call_llm_retries_502_then_succeeds(self) -> None:
+        response = FakeResponse({"choices": [{"message": {"content": "成功"}}]})
+        error = self.http_error(502, "bad gateway")
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=True), \
+                mock.patch.object(self.module.urllib.request, "urlopen", side_effect=[error, response]) as urlopen, \
+                mock.patch.object(self.module.time, "sleep") as sleep:
+            result = self.module.call_llm("prompt", "model", "chat")
+        self.assertEqual(result, "成功")
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    def test_call_llm_does_not_retry_401(self) -> None:
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=True), \
+                mock.patch.object(self.module.urllib.request, "urlopen", side_effect=self.http_error(401, "unauthorized")) as urlopen, \
+                mock.patch.object(self.module.time, "sleep") as sleep:
+            with self.assertRaises(SystemExit):
+                self.module.call_llm("prompt", "model", "chat")
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_call_llm_fails_after_retry_limit(self) -> None:
+        errors = [self.http_error(502, f"bad gateway {index}") for index in range(3)]
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=True), \
+                mock.patch.object(self.module.urllib.request, "urlopen", side_effect=errors) as urlopen, \
+                mock.patch.object(self.module.time, "sleep") as sleep:
+            with self.assertRaises(SystemExit):
+                self.module.call_llm("prompt", "model", "chat")
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+
+    def http_error(self, status: int, detail: str):
+        return self.module.urllib.error.HTTPError(
+            "https://example.test",
+            status,
+            detail,
+            {},
+            io.BytesIO(detail.encode("utf-8")),
+        )
+
     def test_long_lecture_split_uses_all_segments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             out_dir = Path(temp_dir)
@@ -162,6 +265,20 @@ class VideoSummaryTests(unittest.TestCase):
             timed = (out_dir / "transcript_timed.txt").read_text(encoding="utf-8")
         self.assertEqual(segments[0]["start"], 12.0)
         self.assertIn("[01:05]", timed)
+
+
+class FakeResponse:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
 
 
 if __name__ == "__main__":

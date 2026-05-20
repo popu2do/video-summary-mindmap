@@ -44,13 +44,13 @@ video summaries.
 └── README.md
 ```
 
-## Requirements
+## Requirements and Access
 
 - Python 3.12 is recommended for `faster-whisper` compatibility.
-- `ffmpeg` must be available on `PATH` when audio download or transcription is
-  needed.
-- Network access is required for online videos, model downloads, and optional
-  LLM refinement.
+- FFmpeg must be installed and available on `PATH` when audio download or
+  transcription is needed.
+- Network access is required for online videos, first-time local transcription
+  model downloads, and optional LLM refinement.
 
 Install Python dependencies:
 
@@ -58,6 +58,27 @@ Install Python dependencies:
 python -m venv .venv
 & ".venv/Scripts/python.exe" -m pip install -r requirements.txt
 ```
+
+Install FFmpeg separately if it is not already available:
+
+```powershell
+ffmpeg -version
+```
+
+The command above should print version information. If it is not found, install
+FFmpeg with your system package manager and reopen the terminal.
+
+Additional setup is scenario-specific:
+
+- `faster-whisper` downloads model files on first use. If Hugging Face access is
+  slow or blocked in your environment, pre-download the model, configure the
+  relevant cache, or use an environment that can reach the model host.
+- Bilibili, YouTube, and other video platforms may block anonymous downloads,
+  require login, rate-limit requests, or be unavailable from some networks.
+  Restricted videos may require an installed browser profile and
+  `--cookies-from-browser edge|chrome|firefox`.
+- LLM-polished output requires a reachable OpenAI-compatible API endpoint,
+  matching `OPENAI_API_KIND`, and a valid API key.
 
 ## Configuration
 
@@ -82,11 +103,12 @@ For OpenAI-compatible providers, set:
 - `OPENAI_API_KEY`: provider API key.
 - `OPENAI_BASE_URL`: compatible API base URL.
 - `OPENAI_MODEL`: refinement model.
-- `OPENAI_API_KIND`: `responses` or `chat`.
+- `OPENAI_API_KIND`: `responses` or `chat`. The CLI default is `responses`;
+  many OpenAI-compatible providers only support `chat`.
 
 Optional transcription defaults:
 
-- `TRANSCRIBE_ENGINE`: `local` or `openai`; default is `local`.
+- `TRANSCRIBE_ENGINE`: `local` by default.
 - `LOCAL_WHISPER_MODEL`: default is `tiny`.
 - `TRANSCRIBE_LANGUAGE`: `auto`, `zh`, `en`, or `ja`; invalid values fall back
   to `auto`.
@@ -148,20 +170,30 @@ Outputs are written to:
 workflow/output/<video-id>/
 ```
 
-Common files:
+Generated for each successful run:
 
 ```text
 metadata.json
-transcription.json
 transcript.txt
-transcript_segments.json
-transcript_timed.txt
 summary.md
 mindmap.mmd
-summary_refined.md
-mindmap_refined.mmd
-summary_chunks.json
-audio.mp3
+```
+
+Generated when timestamped subtitles or ASR segments are available:
+
+```text
+transcript_segments.json
+transcript_timed.txt
+transcription.json
+```
+
+Generated when applicable:
+
+```text
+audio.mp3              # downloaded only when online media must be transcribed
+summary_refined.md     # with --llm-refine
+mindmap_refined.mmd    # when refined output includes Mermaid
+summary_chunks.json    # long lecture refinement
 ```
 
 Output roles:
@@ -175,6 +207,8 @@ Output roles:
 - `mindmap_refined.mmd`: Mermaid extracted from the polished summary.
 - `summary_chunks.json`: resumable intermediate chunk summaries for long
   lecture refinement.
+- `audio.mp3`: downloaded audio for online media transcription; local media is
+  read directly and is not copied to `audio.mp3`.
 - `metadata.json`: source metadata and analysis scope.
 
 ## CLI Options
@@ -262,5 +296,4 @@ handling, prompt structure, and output contract.
 
 ## License
 
-No license has been declared yet. Add a `LICENSE` file before distributing or
-accepting external contributions.
+No license file is currently included.

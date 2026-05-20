@@ -96,11 +96,9 @@ python -m pip install yt-dlp
 
 Fallback transcription requires:
 
-- `OPENAI_API_KEY` in the environment
-- the bundled Codex `transcribe` skill script, or `TRANSCRIBE_CLI` pointing to an equivalent CLI
 - `ffmpeg` available on `PATH` for audio extraction
 
-Install `faster-whisper` in a compatible Python environment for local transcription. The script uses CPU `faster-whisper` with `--transcribe-engine local --local-whisper-model tiny --language auto` by default. Use `--transcribe-engine openai` only when the OpenAI transcription SDK path is configured and the media size is supported.
+Install `faster-whisper` in a compatible Python environment for local transcription. The script uses CPU `faster-whisper` with `--transcribe-engine local --local-whisper-model tiny --language auto` by default.
 
 Do not ask users to paste API keys into chat. Read keys only from local environment variables.
 

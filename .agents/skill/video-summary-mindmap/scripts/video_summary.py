@@ -8,7 +8,6 @@ import html
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 import tomllib
@@ -457,22 +456,16 @@ def download_audio(source: str, out_dir: Path, cookies_from_browser: str | None)
 
 
 def transcribe_audio(audio: Path, out_dir: Path, local_model: str, engine: str, language: str) -> str:
-    if engine == "local" or not os.environ.get("OPENAI_API_KEY"):
-        return transcribe_audio_local(audio, out_dir, local_model, language)
-    cli = Path(os.environ.get("TRANSCRIBE_CLI", "transcribe_diarize.py"))
-    if not cli.exists():
-        fail(f"找不到转写脚本：{cli}")
-    transcript = out_dir / "transcript.txt"
-    cmd = [sys.executable, str(cli), str(audio), "--response-format", "text", "--out", str(transcript)]
-    subprocess.run(cmd, check=True)
-    return transcript.read_text(encoding="utf-8", errors="ignore")
+    if engine != "local":
+        fail(f"不支持的转写引擎：{engine}")
+    return transcribe_audio_local(audio, out_dir, local_model, language)
 
 
 def transcribe_audio_local(audio: Path, out_dir: Path, model_name: str, language: str) -> str:
     try:
         from faster_whisper import WhisperModel  # type: ignore
     except ImportError:
-        fail("没有字幕，且未设置 OPENAI_API_KEY；本地转写还需要安装 faster-whisper。")
+        fail("没有字幕，且本地转写需要安装 faster-whisper。")
 
     model = WhisperModel(model_name, device="cpu", compute_type="int8")
     transcribe_options: dict[str, Any] = {"vad_filter": True}
@@ -1206,8 +1199,8 @@ def main() -> None:
     parser.add_argument("--out-root", default="workflow/output", help="输出根目录")
     parser.add_argument("--cookies-from-browser", help="需要登录态时读取浏览器 Cookie，例如 chrome、edge、firefox")
     parser.add_argument("--force-transcribe", action="store_true", help="忽略字幕，强制下载音频并转写")
-    parser.add_argument("--transcribe-engine", choices=("local", "openai"), default=os.environ.get("TRANSCRIBE_ENGINE", "local"), help="转写引擎：local 使用 faster-whisper，openai 使用 Codex transcribe skill")
-    parser.add_argument("--local-whisper-model", default=os.environ.get("LOCAL_WHISPER_MODEL", "tiny"), help="无 OPENAI_API_KEY 时使用的 faster-whisper 模型")
+    parser.add_argument("--transcribe-engine", choices=("local",), default=os.environ.get("TRANSCRIBE_ENGINE", "local"), help="转写引擎：local 使用 faster-whisper")
+    parser.add_argument("--local-whisper-model", default=os.environ.get("LOCAL_WHISPER_MODEL", "tiny"), help="faster-whisper 模型")
     parser.add_argument("--language", choices=SUPPORTED_LANGUAGES, default=default_transcribe_language(), help="转写语言：auto 自动检测，zh/en/ja 固定语言")
     parser.add_argument("--domain", choices=SUPPORTED_DOMAINS, default=os.environ.get("SUMMARY_DOMAIN", "general"), help="领域词表：general 通用，zh-social 中文情感/社交课程")
     parser.add_argument("--reuse-transcript", action="store_true", help="如果输出目录已有 transcript.txt，则只重新生成摘要和脑图")
