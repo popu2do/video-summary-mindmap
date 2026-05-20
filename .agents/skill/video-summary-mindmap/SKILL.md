@@ -28,6 +28,12 @@ The root wrapper is equivalent:
 python "workflow/video_summary.py" "VIDEO_URL"
 ```
 
+## Workflow Boundary
+
+For video-summary-mindmap tasks, use `workflow/video_summary.py` or `scripts/video_summary.py` end to end. Do not call separate Codex transcribe skills, ffmpeg whisper filters, whisper.cpp commands, or ad hoc transcription scripts as part of this workflow.
+
+If transcription fails, report the failed phase and the exact error. Do not switch transcription engines or download alternate model formats unless the user explicitly asks for that fallback.
+
 ## Decision Rules
 
 1. Prefer native subtitles from `yt-dlp` metadata.
@@ -47,7 +53,7 @@ Use these modes based on speed and quality requirements:
 - Better local: `--transcribe-engine local --local-whisper-model small --language zh --template refined`
 - Course/livestream notes: `--content-type lecture --llm-refine --domain zh-social --language zh`
 - Review pass: rerun with `--reuse-transcript --llm-refine` after editing `transcript.txt`
-- Best quality: produce transcript with a stronger model or OpenAI transcription, then run `--llm-refine` to generate `summary_refined.md` and `mindmap_refined.mmd`
+- Best quality: produce or edit a high-quality transcript first, then run `--reuse-transcript --llm-refine` to generate `summary_refined.md` and `mindmap_refined.mmd`
 
 Local transcription defaults to `--language auto`. Keep `--language zh` for Chinese courses when fixed-language recognition gives better terminology stability.
 
@@ -91,7 +97,7 @@ This reads `~/.codex/config.toml` for model, API style, and base URL only. It do
 Required:
 
 ```powershell
-python -m pip install yt-dlp
+python -m pip install -r requirements.txt
 ```
 
 Fallback transcription requires:
