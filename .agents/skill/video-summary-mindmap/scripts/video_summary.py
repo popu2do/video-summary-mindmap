@@ -78,6 +78,18 @@ def import_ytdlp() -> Any:
 
 
 def extract_info(source: str, cookies_from_browser: str | None) -> dict[str, Any]:
+    local_path = local_source_path(source)
+    if local_path:
+        return {
+            "id": safe_filename(local_path.stem),
+            "display_id": safe_filename(local_path.stem),
+            "title": local_path.stem,
+            "uploader": "本地文件",
+            "duration": None,
+            "subtitles": {},
+            "automatic_captions": {},
+            "_local_path": str(local_path),
+        }
     yt_dlp = import_ytdlp()
     options: dict[str, Any] = {
         "quiet": True,
@@ -89,6 +101,13 @@ def extract_info(source: str, cookies_from_browser: str | None) -> dict[str, Any
         options["cookiesfrombrowser"] = (cookies_from_browser,)
     with yt_dlp.YoutubeDL(options) as ydl:
         return ydl.extract_info(source, download=False)
+
+
+def local_source_path(source: str) -> Path | None:
+    path = Path(source)
+    if path.exists() and path.is_file():
+        return path
+    return None
 
 
 def choose_subtitle(info: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
@@ -221,6 +240,9 @@ def normalize_asr_text(text: str) -> str:
 
 
 def download_audio(source: str, out_dir: Path, cookies_from_browser: str | None) -> Path:
+    local_path = local_source_path(source)
+    if local_path:
+        return local_path
     yt_dlp = import_ytdlp()
     template = str(out_dir / "audio.%(ext)s")
     options: dict[str, Any] = {

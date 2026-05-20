@@ -80,6 +80,12 @@ Generate semantic polished output:
 & ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --reuse-transcript --template refined --llm-refine
 ```
 
+Analyze a local media file:
+
+```powershell
+& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/example.mp4" --transcribe-engine local --local-whisper-model tiny --template refined --llm-refine
+```
+
 Use browser cookies when the platform requires login:
 
 ```powershell
