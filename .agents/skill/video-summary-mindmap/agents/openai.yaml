@@ -1,0 +1,3 @@
+display_name: Video Summary Mindmap
+short_description: Video to summary and mind map
+default_prompt: Summarize this video URL or local media file and produce a transcript, structured Markdown summary, and Mermaid mind map.
