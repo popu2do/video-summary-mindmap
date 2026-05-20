@@ -80,6 +80,12 @@ Generate semantic polished output:
 & ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --reuse-transcript --template refined --llm-refine
 ```
 
+Generate course/livestream notes:
+
+```powershell
+& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/course.mp4" --reuse-transcript --template refined --content-type lecture --llm-refine
+```
+
 Analyze a local media file:
 
 ```powershell

@@ -44,6 +44,7 @@ Use these modes based on speed and quality requirements:
 - Better local: `--transcribe-engine local --local-whisper-model small --template refined`
 - Review pass: rerun with `--reuse-transcript --template refined` after editing `transcript.txt`
 - Best quality: produce transcript with a stronger model or OpenAI transcription, then run `--llm-refine` to generate `summary_refined.md` and `mindmap_refined.mmd`
+- Lecture/livestream notes: use `--content-type lecture --llm-refine`; the script sends a shorter transcript window by default to avoid provider timeouts
 
 The built-in offline summary is extractive. It is reliable and cheap, but it cannot fully replace a language model for polished abstracts, accurate terminology explanations, or insight-level chapter titles.
 

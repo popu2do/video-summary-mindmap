@@ -504,6 +504,7 @@ def refine_with_llm(
     model: str,
     api_kind: str,
     max_chars: int,
+    content_type: str,
 ) -> None:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -520,6 +521,7 @@ def refine_with_llm(
         transcript=transcript[:max_chars],
         subtitle_lang=subtitle_lang,
         draft_summary=(out_dir / "summary.md").read_text(encoding="utf-8", errors="ignore") if (out_dir / "summary.md").exists() else "",
+        content_type=content_type,
     )
     refined = call_llm(prompt, model=model, api_kind=api_kind)
     refined_path = out_dir / "summary_refined.md"
@@ -537,8 +539,10 @@ def build_llm_prompt(
     transcript: str,
     subtitle_lang: str | None,
     draft_summary: str,
+    content_type: str,
 ) -> str:
-    prompt_path = Path(__file__).resolve().parents[1] / "references" / "refined_prompt.md"
+    prompt_file = "lecture_prompt.md" if content_type == "lecture" else "refined_prompt.md"
+    prompt_path = Path(__file__).resolve().parents[1] / "references" / prompt_file
     instructions = prompt_path.read_text(encoding="utf-8", errors="ignore") if prompt_path.exists() else ""
     return f"""{instructions}
 
@@ -550,6 +554,7 @@ Video metadata:
 - author: {author}
 - duration: {duration}
 - transcript source: {subtitle_lang or 'local transcription'}
+- content type: {content_type}
 
 Draft summary, if useful:
 {draft_summary[:12000]}
@@ -655,6 +660,20 @@ def extract_mermaid(markdown: str) -> str:
         return match.group(1)
     match = re.search(r"(^mindmap\s+.*)", markdown, flags=re.DOTALL | re.MULTILINE)
     return match.group(1) if match else ""
+
+
+def resolve_content_type(value: str, info: dict[str, Any], source: str) -> str:
+    if value != "auto":
+        return value
+    title = str(info.get("title") or "")
+    source_lower = source.lower()
+    lecture_markers = ("课", "课程", "第", "节", "理论", "训练", "workshop", "lecture", "lesson", "course")
+    if any(marker in title.lower() or marker in source_lower for marker in lecture_markers):
+        return "lecture"
+    duration = info.get("duration")
+    if isinstance(duration, (int, float)) and duration >= 1800:
+        return "lecture"
+    return "video"
 
 
 def chapterize_from_files(out_dir: Path, transcript: str, chapters: int) -> list[dict[str, Any]]:
@@ -790,6 +809,7 @@ def main() -> None:
     parser.add_argument("--local-whisper-model", default=os.environ.get("LOCAL_WHISPER_MODEL", "tiny"), help="无 OPENAI_API_KEY 时使用的 faster-whisper 模型")
     parser.add_argument("--reuse-transcript", action="store_true", help="如果输出目录已有 transcript.txt，则只重新生成摘要和脑图")
     parser.add_argument("--template", choices=("compact", "refined"), default="refined", help="摘要模板：compact 简版，refined 精校版")
+    parser.add_argument("--content-type", choices=("auto", "video", "lecture"), default=os.environ.get("CONTENT_TYPE", "auto"), help="内容类型：lecture 适合课程/直播长口播")
     parser.add_argument("--llm-refine", action="store_true", help="调用 OpenAI-compatible LLM 生成语义精校版 summary_refined.md")
     parser.add_argument("--llm-model", default=os.environ.get("OPENAI_MODEL", DEFAULT_LLM_MODEL), help="LLM 精校模型")
     parser.add_argument("--llm-api", choices=("responses", "chat"), default=os.environ.get("OPENAI_API_KIND", "responses"), help="LLM API 类型：responses 或 chat")
@@ -827,9 +847,21 @@ def main() -> None:
         fail("转写文本过短，无法生成摘要。")
 
     transcript = normalize_asr_text(transcript)
+    content_type = resolve_content_type(args.content_type, info, source)
     write_outputs(info, source, out_dir, transcript, subtitle_lang, args.template)
     if args.llm_refine:
-        refine_with_llm(info, source, out_dir, transcript, subtitle_lang, args.llm_model, args.llm_api, args.llm_max_chars)
+        llm_max_chars = min(args.llm_max_chars, 30000) if content_type == "lecture" and args.llm_max_chars == 60000 else args.llm_max_chars
+        refine_with_llm(
+            info,
+            source,
+            out_dir,
+            transcript,
+            subtitle_lang,
+            args.llm_model,
+            args.llm_api,
+            llm_max_chars,
+            content_type,
+        )
     print(f"输出目录：{out_dir}")
     print(f"- transcript.txt")
     print(f"- summary.md")
