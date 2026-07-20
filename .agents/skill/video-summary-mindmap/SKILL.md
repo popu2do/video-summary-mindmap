@@ -1,13 +1,13 @@
 ---
 name: video-summary-mindmap
-description: Summarize Bilibili, YouTube, and local video or audio into transcripts, structured Markdown summaries, and Mermaid mind maps. Use when asked to analyze videos, extract subtitles, transcribe media, summarize lectures, tutorials, interviews, or create mind-map outputs from video content.
+description: Summarize Bilibili, YouTube, local video/audio, PDF, and OOXML Word documents into transcripts, structured Markdown summaries, and Mermaid mind maps. Use when asked to analyze videos, documents, lectures, tutorials, interviews, or create mind-map outputs from source content.
 ---
 
 # Video Summary Mindmap
 
 ## Workflow
 
-Use `scripts/video_summary.py` for repeatable video analysis. It accepts a Bilibili or YouTube URL, or a local media path, then writes:
+Use `scripts/video_summary.py` for repeatable source analysis. It accepts a Bilibili or YouTube URL, a local media path, or a local PDF/OOXML Word document (`.pdf`, `.doc`, `.docx`), then writes:
 
 - `transcript.txt`
 - `transcript_segments.json`
@@ -28,6 +28,16 @@ The root wrapper is equivalent:
 python "workflow/video_summary.py" "VIDEO_URL"
 ```
 
+For documents, use the same command and output layout:
+
+```powershell
+python "workflow/video_summary.py" "D:/Documents/lecture.pdf" --template refined --content-type lecture --language zh
+python "workflow/video_summary.py" "D:/Documents/lecture.doc" --template refined --content-type lecture --language zh
+```
+
+The document text is extracted directly into `workflow/output/<video-id>/transcript.txt`;
+rerun with `--reuse-transcript` for later summary or LLM refinement passes.
+
 ## Workflow Boundary
 
 For video-summary-mindmap tasks, use `workflow/video_summary.py` or `scripts/video_summary.py` end to end. Do not call separate Codex transcribe skills, ffmpeg whisper filters, whisper.cpp commands, or ad hoc transcription scripts as part of this workflow.
@@ -36,13 +46,14 @@ If transcription fails, report the failed phase and the exact error. Do not swit
 
 ## Decision Rules
 
-1. Prefer native subtitles from `yt-dlp` metadata.
-2. If subtitles are unavailable, download audio and transcribe it.
-3. Use `--cookies-from-browser chrome` or `--cookies-from-browser edge` when Bilibili or YouTube requires login state.
-4. Use `--force-transcribe` only when subtitles are inaccurate or missing important speech.
-5. Use `--reuse-transcript` to regenerate summaries from an existing `transcript.txt` without downloading or transcribing again.
-6. Use `--template refined` for BibiGPT-style output: abstract, highlights, questions, terms, chapter summaries, mind map, and transcript.
-7. Keep outputs in a per-video directory under `workflow/output/<video-id>/`.
+1. For PDF and OOXML Word inputs, extract document text directly before any media fallback.
+2. Prefer native subtitles from `yt-dlp` metadata for online videos.
+3. If subtitles are unavailable, download audio and transcribe it.
+4. Use `--cookies-from-browser chrome` or `--cookies-from-browser edge` when Bilibili or YouTube requires login state.
+5. Use `--force-transcribe` only when subtitles are inaccurate or missing important speech.
+6. Use `--reuse-transcript` to regenerate summaries from an existing `transcript.txt` without downloading, extracting, or transcribing again.
+7. Use `--template refined` for BibiGPT-style output: abstract, highlights, questions, terms, chapter summaries, mind map, and transcript.
+8. Keep outputs in a per-source directory under `workflow/output/<video-id>/`.
 
 ## Quality Modes
 
@@ -59,7 +70,7 @@ Local transcription defaults to `--language auto`. Keep `--language zh` for Chin
 
 The built-in `summary.md` is an offline extractive draft. It is reliable and cheap, but it cannot fully replace a language model for polished abstracts, accurate terminology explanations, or insight-level chapter titles. Treat `summary_refined.md` as the high-quality delivery file when `--llm-refine` is enabled.
 
-For long lecture transcripts, `--llm-refine` summarizes chronological chunks first and then merges those chunk summaries into the final `summary_refined.md`. This avoids dropping the back half of the video while keeping each provider request bounded. Completed chunk summaries are saved to `summary_chunks.json` after each chunk and reused on rerun.
+For long lecture transcripts, `--llm-refine` summarizes chronological chunks first and then merges those chunk summaries into the final `summary_refined.md`. Lecture requests are split at 12,000 characters or less, even when `--llm-max-chars` remains at its 60,000-character default; this keeps provider requests below timeout-prone payload sizes while preserving chronological coverage. Completed chunk summaries are saved to `summary_chunks.json` after each chunk and reused on rerun.
 
 Use `--domain general` by default for technical videos, business interviews, English media, and mixed-topic content. Use `--domain zh-social` only for Chinese relationship/social-skill courses where the bundled terminology helps correct ASR and extract terms.
 
@@ -99,6 +110,9 @@ Required:
 ```powershell
 python -m pip install -r requirements.txt
 ```
+
+PDF input additionally requires `pypdf`. `.doc`/`.docx` support covers OOXML
+containers; legacy binary `.doc` files are rejected with an explicit format error.
 
 Fallback transcription requires:
 

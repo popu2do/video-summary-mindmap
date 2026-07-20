@@ -16,6 +16,8 @@ video summaries.
 - Extract subtitles with `yt-dlp` when platform captions are available.
 - Transcribe local audio with `faster-whisper` when subtitles are missing or
   explicitly ignored.
+- Read local PDF and OOXML Word documents (`.doc`/`.docx`) directly into the
+  same transcript, summary, and mind-map workflow.
 - Generate deterministic offline outputs: `summary.md`, `mindmap.mmd`, and
   transcript artifacts.
 - Optionally generate LLM-polished outputs: `summary_refined.md` and
@@ -47,6 +49,8 @@ video summaries.
 ## Requirements and Access
 
 - Python 3.12 is recommended for `faster-whisper` compatibility.
+- PDF input requires the `pypdf` dependency. `.doc` files must be OOXML
+  containers (some Word exports use the `.doc` suffix for this format).
 - FFmpeg must be installed and available on `PATH` when audio download or
   transcription is needed.
 - Network access is required for online videos, first-time local transcription
@@ -139,6 +143,18 @@ Generate Chinese course or livestream notes:
 & ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/course.mp4" --reuse-transcript --template refined --content-type lecture --domain zh-social --language zh --llm-refine
 ```
 
+Process a local PDF or OOXML Word document:
+
+```powershell
+& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Documents/lecture.pdf" --template refined --content-type lecture --language zh
+& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Documents/lecture.doc" --template refined --content-type lecture --language zh
+```
+
+Document inputs use the same `workflow/output/<video-id>/` layout as video inputs.
+The extracted text is written to `transcript.txt`, so `--reuse-transcript` can
+be used for later summary or LLM-refinement reruns without reading the document
+again.
+
 Analyze a local media file:
 
 ```powershell
@@ -206,7 +222,8 @@ Output roles:
 - `summary_refined.md`: optional LLM-polished delivery file.
 - `mindmap_refined.mmd`: Mermaid extracted from the polished summary.
 - `summary_chunks.json`: resumable intermediate chunk summaries for long
-  lecture refinement.
+  lecture refinement. Lecture requests are split into chunks of at most 12,000
+  characters before the final merge to avoid provider request timeouts.
 - `audio.mp3`: downloaded audio for online media transcription; local media is
   read directly and is not copied to `audio.mp3`.
 - `metadata.json`: source metadata and analysis scope.

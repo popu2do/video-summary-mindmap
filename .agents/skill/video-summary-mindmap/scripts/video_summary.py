@@ -8,17 +8,21 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import tomllib
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 from typing import Any
 
 
 PREFERRED_LANGS = ("zh-Hans", "zh-CN", "zh", "zh-Hant", "en")
 TEXT_EXTENSIONS = {".vtt", ".srt", ".ass", ".ssa", ".json", ".txt", ".xml"}
+DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx"}
 DEFAULT_LLM_MODEL = "gpt-5.4-mini"
 DEFAULT_TRANSCRIBE_LANGUAGE = "auto"
 SUPPORTED_LANGUAGES = ("auto", "zh", "en", "ja")
@@ -134,6 +138,38 @@ def local_source_path(source: str) -> Path | None:
     if path.exists() and path.is_file():
         return path
     return None
+
+
+def extract_document_text(path: Path) -> str:
+    """Extract text from PDF or OOXML documents without changing output layout."""
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except ImportError:
+            fail("读取 PDF 需要安装 pypdf：python -m pip install pypdf")
+        reader = PdfReader(str(path))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        return normalize_text(text)
+    if suffix in {".doc", ".docx"}:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                document_xml = archive.read("word/document.xml")
+        except (KeyError, zipfile.BadZipFile) as error:
+            fail(f"仅支持 OOXML 格式的 .doc/.docx 文档：{path} ({error})")
+        try:
+            root = ET.fromstring(document_xml)
+        except ET.ParseError as error:
+            fail(f"DOC 文档 XML 解析失败：{path} ({error})")
+        namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        paragraphs = []
+        for paragraph in root.iter(namespace + "p"):
+            value = "".join(node.text or "" for node in paragraph.iter(namespace + "t"))
+            if value.strip():
+                paragraphs.append(value)
+        return normalize_text("\n".join(paragraphs))
+    fail(f"不支持的文档格式：{path.suffix}")
+    return ""
 
 
 def choose_subtitle(info: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
@@ -456,16 +492,22 @@ def download_audio(source: str, out_dir: Path, cookies_from_browser: str | None)
 
 
 def transcribe_audio(audio: Path, out_dir: Path, local_model: str, engine: str, language: str) -> str:
-    if engine != "local":
-        fail(f"不支持的转写引擎：{engine}")
-    return transcribe_audio_local(audio, out_dir, local_model, language)
+    if engine == "local" or not os.environ.get("OPENAI_API_KEY"):
+        return transcribe_audio_local(audio, out_dir, local_model, language)
+    cli = Path(os.environ.get("TRANSCRIBE_CLI", "C:/Users/ZhouJian/.codex/skills/transcribe/scripts/transcribe_diarize.py"))
+    if not cli.exists():
+        fail(f"找不到转写脚本：{cli}")
+    transcript = out_dir / "transcript.txt"
+    cmd = [sys.executable, str(cli), str(audio), "--response-format", "text", "--out", str(transcript)]
+    subprocess.run(cmd, check=True)
+    return transcript.read_text(encoding="utf-8", errors="ignore")
 
 
 def transcribe_audio_local(audio: Path, out_dir: Path, model_name: str, language: str) -> str:
     try:
         from faster_whisper import WhisperModel  # type: ignore
     except ImportError:
-        fail("没有字幕，且本地转写需要安装 faster-whisper。")
+        fail("没有字幕，且未设置 OPENAI_API_KEY；本地转写还需要安装 faster-whisper。")
 
     model = WhisperModel(model_name, device="cpu", compute_type="int8")
     transcribe_options: dict[str, Any] = {"vad_filter": True}
@@ -690,6 +732,11 @@ def write_outputs(info: dict[str, Any], source: str, out_dir: Path, transcript: 
     (out_dir / "mindmap.mmd").write_text(build_mermaid(title, sections, key_points, terms) + "\n", encoding="utf-8")
 
 
+def should_chunk_lecture(transcript: str, max_chars: int) -> bool:
+    """Keep lecture requests below the provider timeout-prone payload size."""
+    return len(transcript) > min(max_chars, 12000)
+
+
 def refine_with_llm(
     info: dict[str, Any],
     source: str,
@@ -709,7 +756,7 @@ def refine_with_llm(
     author = str(info.get("uploader") or info.get("channel") or "未知")
     duration = format_duration(info.get("duration"))
     draft_summary = (out_dir / "summary.md").read_text(encoding="utf-8", errors="ignore") if (out_dir / "summary.md").exists() else ""
-    if content_type == "lecture" and len(transcript) > max_chars:
+    if content_type == "lecture" and should_chunk_lecture(transcript, max_chars):
         refined = refine_long_lecture_with_llm(
             title=title,
             source=source,
@@ -721,7 +768,7 @@ def refine_with_llm(
             draft_summary=draft_summary,
             model=model,
             api_kind=api_kind,
-            chunk_chars=min(max_chars, 30000),
+            chunk_chars=min(max_chars, 12000),
         )
     else:
         prompt = build_llm_prompt(
@@ -1199,8 +1246,8 @@ def main() -> None:
     parser.add_argument("--out-root", default="workflow/output", help="输出根目录")
     parser.add_argument("--cookies-from-browser", help="需要登录态时读取浏览器 Cookie，例如 chrome、edge、firefox")
     parser.add_argument("--force-transcribe", action="store_true", help="忽略字幕，强制下载音频并转写")
-    parser.add_argument("--transcribe-engine", choices=("local",), default=os.environ.get("TRANSCRIBE_ENGINE", "local"), help="转写引擎：local 使用 faster-whisper")
-    parser.add_argument("--local-whisper-model", default=os.environ.get("LOCAL_WHISPER_MODEL", "tiny"), help="faster-whisper 模型")
+    parser.add_argument("--transcribe-engine", choices=("local", "openai"), default=os.environ.get("TRANSCRIBE_ENGINE", "local"), help="转写引擎：local 使用 faster-whisper，openai 使用 Codex transcribe skill")
+    parser.add_argument("--local-whisper-model", default=os.environ.get("LOCAL_WHISPER_MODEL", "tiny"), help="无 OPENAI_API_KEY 时使用的 faster-whisper 模型")
     parser.add_argument("--language", choices=SUPPORTED_LANGUAGES, default=default_transcribe_language(), help="转写语言：auto 自动检测，zh/en/ja 固定语言")
     parser.add_argument("--domain", choices=SUPPORTED_DOMAINS, default=os.environ.get("SUMMARY_DOMAIN", "general"), help="领域词表：general 通用，zh-social 中文情感/社交课程")
     parser.add_argument("--reuse-transcript", action="store_true", help="如果输出目录已有 transcript.txt，则只重新生成摘要和脑图")
@@ -1230,6 +1277,15 @@ def main() -> None:
     existing_transcript = out_dir / "transcript.txt"
     if args.reuse_transcript and existing_transcript.exists():
         transcript = existing_transcript.read_text(encoding="utf-8", errors="ignore")
+    local_path = local_source_path(source)
+    if not transcript and local_path and local_path.suffix.lower() in DOCUMENT_EXTENSIONS:
+        transcript = extract_document_text(local_path)
+        write_transcript_artifacts(
+            out_dir,
+            transcript,
+            None,
+            {"engine": "document", "requested_language": args.language, "domain": args.domain},
+        )
     if not args.force_transcribe:
         subtitle = choose_subtitle(info)
         if subtitle and not transcript:

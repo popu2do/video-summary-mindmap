@@ -32,6 +32,48 @@ class VideoSummaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.module = load_module()
 
+    def test_extract_docx_text_from_ooxml_container(self) -> None:
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sample.doc"
+            document_xml = (
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+                "<w:body><w:p><w:r><w:t>第一段</w:t></w:r></w:p>"
+                "<w:p><w:r><w:t>第二段</w:t></w:r></w:p></w:body></w:document>"
+            )
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/document.xml", document_xml)
+            text = self.module.extract_document_text(path)
+        self.assertEqual(text, "第一段\n第二段")
+
+    def test_extract_pdf_text_uses_pypdf(self) -> None:
+        fake_pypdf = types.ModuleType("pypdf")
+
+        class Page:
+            def extract_text(self):
+                return "PDF 第一页"
+
+        class PdfReader:
+            def __init__(self, path):
+                self.pages = [Page()]
+
+        fake_pypdf.PdfReader = PdfReader
+        original = sys.modules.get("pypdf")
+        sys.modules["pypdf"] = fake_pypdf
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "sample.pdf"
+                path.write_bytes(b"%PDF-fake")
+                text = self.module.extract_document_text(path)
+        finally:
+            if original is None:
+                sys.modules.pop("pypdf", None)
+            else:
+                sys.modules["pypdf"] = original
+        self.assertEqual(text, "PDF 第一页")
+
     def test_vtt_segments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "sample.vtt"
@@ -226,6 +268,10 @@ class VideoSummaryTests(unittest.TestCase):
             {},
             io.BytesIO(detail.encode("utf-8")),
         )
+
+    def test_lecture_should_chunk_before_default_request_limit(self) -> None:
+        self.assertTrue(self.module.should_chunk_lecture("x" * 12001, 60000))
+        self.assertFalse(self.module.should_chunk_lecture("x" * 12000, 60000))
 
     def test_long_lecture_split_uses_all_segments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
