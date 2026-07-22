@@ -1,7 +1,7 @@
 # Video Summary Mindmap
 
 Generate transcripts, structured Markdown notes, and Mermaid mind maps from
-Bilibili videos, YouTube videos, and local media files.
+Bilibili or YouTube URLs, local audio and local video files, PDFs, and OOXML Word documents.
 
 The workflow is subtitle-first and transcription-backed: it tries to reuse
 available subtitles, falls back to local audio transcription when needed, and
@@ -16,8 +16,8 @@ video summaries.
 - Extract subtitles with `yt-dlp` when platform captions are available.
 - Transcribe local audio with `faster-whisper` when subtitles are missing or
   explicitly ignored.
-- Read local PDF and OOXML Word documents (`.doc`/`.docx`) directly into the
-  same transcript, summary, and mind-map workflow.
+- Read local audio and local video files, PDFs, and OOXML Word documents (`.doc`/`.docx`)
+  directly into the same transcript, summary, and mind-map workflow.
 - Generate deterministic offline outputs: `summary.md`, `mindmap.mmd`, and
   transcript artifacts.
 - Optionally generate LLM-polished outputs: `summary_refined.md` and
@@ -34,17 +34,23 @@ video summaries.
 
 ```text
 .
+├── src/
+│   ├── video_summary_cli.py # canonical CLI entry point
+│   └── video_summary/       # source handling, transcription, summaries, outputs, and LLM refinement
 ├── .agents/skill/video-summary-mindmap/
 │   ├── references/          # prompts and domain terminology
-│   ├── scripts/             # deterministic workflow implementation
-│   ├── tests/               # skill-level regression tests
+│   ├── agents/              # skill agent metadata
 │   └── SKILL.md             # Codex skill instructions
 ├── tests/                   # repository-level regression tests
-├── workflow/video_summary.py # thin wrapper around the skill script
 ├── .env.example
 ├── requirements.txt
 └── README.md
 ```
+
+The `src/video_summary/` package keeps the implementation modules separated by
+responsibility: CLI argument handling, source and document loading, subtitles and
+transcription, transcript summarization, artifact writing, Mermaid generation,
+configuration, and optional LLM refinement.
 
 ## Requirements and Access
 
@@ -110,10 +116,9 @@ For OpenAI-compatible providers, set:
 - `OPENAI_API_KIND`: `responses` or `chat`. The CLI default is `responses`;
   many OpenAI-compatible providers only support `chat`.
 
-Optional transcription defaults:
+Optional local transcription settings:
 
-- `TRANSCRIBE_ENGINE`: `local` by default.
-- `LOCAL_WHISPER_MODEL`: default is `tiny`.
+- `LOCAL_WHISPER_MODEL`: local `faster-whisper` model; default is `tiny`.
 - `TRANSCRIBE_LANGUAGE`: `auto`, `zh`, `en`, or `ja`; invalid values fall back
   to `auto`.
 
@@ -122,35 +127,41 @@ Optional transcription defaults:
 Fast local draft:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --transcribe-engine local --local-whisper-model tiny --template compact
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "https://www.bilibili.com/video/BVxxxx/" --local-whisper-model tiny --template compact
 ```
 
 Better local transcription quality:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --transcribe-engine local --local-whisper-model small --template refined
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "https://www.bilibili.com/video/BVxxxx/" --local-whisper-model small --template refined
 ```
 
-Generate polished output with an OpenAI-compatible LLM:
+Generate polished output with an OpenAI-compatible LLM after a prior run has
+created `output/<source-id>/transcript.txt`:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "https://www.bilibili.com/video/BVxxxx/" --reuse-transcript --template refined --llm-refine
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "https://www.bilibili.com/video/BVxxxx/" --template refined --llm-refine
+# Later rerun, only when output/<source-id>/transcript.txt already exists:
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "https://www.bilibili.com/video/BVxxxx/" --reuse-transcript --template refined --llm-refine
 ```
 
 Generate Chinese course or livestream notes:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/course.mp4" --reuse-transcript --template refined --content-type lecture --domain zh-social --language zh --llm-refine
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Videos/course.mp4" --template refined --content-type lecture --domain zh-social --language zh --llm-refine
 ```
 
 Process a local PDF or OOXML Word document:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Documents/lecture.pdf" --template refined --content-type lecture --language zh
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Documents/lecture.doc" --template refined --content-type lecture --language zh
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.pdf" --template refined --content-type lecture --language zh
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.doc" --template refined --content-type lecture --language zh
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.docx" --template refined --content-type lecture --language zh
 ```
 
-Document inputs use the same `workflow/output/<video-id>/` layout as video inputs.
+Document inputs use the same `output/<source-id>/` layout as video inputs.
+The accepted local document formats are PDF and OOXML Word; a legacy binary `.doc`
+file is rejected even though the `.doc` suffix is accepted for OOXML containers.
 The extracted text is written to `transcript.txt`, so `--reuse-transcript` can
 be used for later summary or LLM-refinement reruns without reading the document
 again.
@@ -158,33 +169,50 @@ again.
 Analyze a local media file:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "D:/Videos/example.mp4" --transcribe-engine local --local-whisper-model small --language auto --template refined
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Videos/example.mp4" --local-whisper-model small --language auto --template refined
 ```
 
 Use browser cookies when the platform requires login:
 
 ```powershell
-& ".venv/Scripts/python.exe" "workflow/video_summary.py" "VIDEO_URL" --cookies-from-browser edge --template refined
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "VIDEO_URL" --cookies-from-browser edge --template refined
 ```
 
 ## Recommended Workflow
 
 1. Run once with subtitle extraction or local transcription.
-2. Inspect and optionally edit `transcript.txt`.
-3. Rerun with `--reuse-transcript`.
+2. Inspect and optionally edit `output/<source-id>/transcript.txt`.
+3. Rerun with `--reuse-transcript` only after that file already exists; the source
+   must still resolve to the same `<source-id>` and `--out-root` must be the same.
+   If `transcript.txt` is missing, the current CLI emits a warning and falls back
+   to ordinary source processing; this documents the current behavior and does not
+   change the source code.
 4. Add `--llm-refine` when you need the polished delivery files.
 
 For Chinese course content, `--language zh` can be more stable than automatic
 detection. For mixed-language, English, or Japanese videos, keep the default
 `--language auto`.
 
+Template distinction: `compact` is the concise deterministic/offline draft with
+core points, an outline, key terms, and a mind map; `refined` is the richer
+structured deterministic template with abstract, highlights, questions, term
+explanations, chapter summaries, mind map, and transcript. `--template refined`
+does not call an LLM; add `--llm-refine` separately for semantic polishing.
+
 ## Outputs
 
-Outputs are written to:
+By default, outputs are written to:
 
 ```text
-workflow/output/<video-id>/
+output/<source-id>/
 ```
+
+`<source-id>` identifies the source, and the directory keeps the output files
+flat under that root. Use `--out-root` to choose a different relative or absolute output root while
+preserving the same `<source-id>/` layout. This directory receives transcripts,
+metadata, and sometimes downloaded audio, so treat it as private data: do not point
+it at a public, shared, or synchronized folder, and do not commit a custom root
+unless it is explicitly protected by your ignore rules.
 
 Generated for each successful run:
 
@@ -195,22 +223,47 @@ summary.md
 mindmap.mmd
 ```
 
-Generated when timestamped subtitles or ASR segments are available:
+### Output role contract
 
-```text
-transcript_segments.json
-transcript_timed.txt
-transcription.json
-```
+The output directory remains flat under `output/<source-id>/`. The following
+contract is the single source of truth for file roles:
 
-Generated when applicable:
+- **核心交付 (core delivery)**: `transcript.txt`, `summary.md`, `mindmap.mmd`,
+  and `metadata.json`. These are the primary handoff files.
+- **可选派生 (optional derived)**: `transcript_segments.json`,
+  `transcript_timed.txt`, `summary_refined.md`, and `mindmap_refined.mmd`.
+  Timestamped files are generated only when timestamped segments are available;
+  refined files require `--llm-refine`.
+- **中间缓存 (intermediate cache)**: `summary_chunks.json`, `audio.mp3`, and
+  `transcription.json`. `summary_chunks.json` supports resumable long-lecture
+  refinement, `audio.mp3` is downloaded only for online transcription, and
+  `transcription.json` only stores transcription metadata; it is an intermediate
+  artifact, not a core delivery file.
 
-```text
-audio.mp3              # downloaded only when online media must be transcribed
-summary_refined.md     # with --llm-refine
-mindmap_refined.mmd    # when refined output includes Mermaid
-summary_chunks.json    # long lecture refinement
-```
+`transcription.json` does not automatically include timestamped `segments`.
+Timestamped segments are written to `transcript_segments.json` and
+`transcript_timed.txt`.
+
+When `--reuse-transcript` reads an edited `transcript.txt`, the CLI records its
+SHA-256 in `metadata.json`. If the hash differs or is unavailable, it removes
+`transcript_segments.json`, `transcript_timed.txt`, `summary_chunks.json`, and
+`transcription.json`, then rebuilds applicable derived data from the current
+transcript. It also
+removes stale `summary_refined.md` and `mindmap_refined.mmd`; reruns without
+`--llm-refine` do not recreate those polished files. A matching hash preserves
+existing timestamped transcript reuse behavior.
+
+### Source ID rules
+
+`<source-id>` 的规则按来源类型区分：
+
+- 在线来源继续使用平台返回的 `id`/`display_id`（例如 `BV1xxxx`），不改变在线来源的复用方式。
+- 本地文件使用 `<安全化文件名>-<扩展名>-<短哈希>`，例如
+  `lecture-mp4-1a2b3c4d`。短哈希取规范化绝对路径的 SHA-256 前 8 位，
+  只用于隔离同名文件，不把原始路径写入输出目录名。无扩展名文件省略扩展名段。
+- 因此，两个不同目录中的 `same-name.docx` 会得到不同的 source-id；
+  不同扩展名也继续保持隔离。使用 `--reuse-transcript` 时，应继续使用同一
+  本地路径和同一 `--out-root`，这样才能定位到原来的 `transcript.txt`。
 
 Output roles:
 
@@ -226,19 +279,21 @@ Output roles:
   characters before the final merge to avoid provider request timeouts.
 - `audio.mp3`: downloaded audio for online media transcription; local media is
   read directly and is not copied to `audio.mp3`.
-- `metadata.json`: source metadata and analysis scope.
+- `metadata.json`: source metadata, analysis scope, and transcript content hash.
+- `transcription.json`: transcription metadata/intermediate artifact; it is not a
+  core delivery file and may be absent or present depending on the processing path.
 
 ## CLI Options
 
 Frequently used options:
 
 ```text
---force-transcribe             Ignore subtitles and transcribe audio.
---reuse-transcript             Rebuild outputs from an existing transcript.txt.
---transcribe-engine local      Use local faster-whisper transcription.
+--out-root PATH                Write to PATH/<source-id>/; keep it private.
+--force-transcribe             Ignore subtitles and transcribe audio; cannot combine with --reuse-transcript.
+--reuse-transcript             Rebuild from an existing output transcript.txt; not a first run; cannot combine with --force-transcribe.
 --local-whisper-model small    Choose faster-whisper model size.
 --language auto|zh|en|ja       Choose or auto-detect transcription language.
---template compact|refined     Choose deterministic summary template.
+--template compact|refined     Choose the concise compact or richer refined template.
 --content-type auto|video|lecture
 --domain general|zh-social
 --llm-refine                   Generate semantic polished outputs.
@@ -246,26 +301,33 @@ Frequently used options:
 --use-codex-config             Reuse non-secret Codex model/base URL settings.
 ```
 
-Run the script with `--help` for the full argument list.
+`--force-transcribe` 与 `--reuse-transcript` 不能同时使用；同时传入会在参数校验阶段被拒绝。运行失败时返回非零码，并使用简洁格式 `ERROR: 阶段=<phase>；<readable reason>`，不打印完整 traceback。
+
+Run the canonical CLI with `--help` for the full argument list:
+
+```powershell
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" --help
+```
+
 
 ## Testing
 
-Run repository tests:
+The root command below is the repository-level regression suite:
+
+```powershell
+python -m unittest discover -s "tests" -v
+```
+
+The root facade regression test can also be run directly:
 
 ```powershell
 python -m unittest "tests/test_video_summary.py"
 ```
 
-Run skill tests directly:
+Compile-check the canonical CLI and tests:
 
 ```powershell
-python ".agents/skill/video-summary-mindmap/tests/test_video_summary.py"
-```
-
-Compile-check the workflow script and tests:
-
-```powershell
-python -m py_compile ".agents/skill/video-summary-mindmap/scripts/video_summary.py" "tests/test_video_summary.py"
+python -m py_compile "src/video_summary_cli.py" "tests/test_video_summary.py"
 ```
 
 ## Privacy and Safety

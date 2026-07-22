@@ -8,8 +8,8 @@
 __pycache__/
 *.py[cod]
 
-workflow/output/
-workflow/test-output/
+output/
+
 external/
 
 *.mp3

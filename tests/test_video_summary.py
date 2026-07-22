@@ -1,32 +1,57 @@
 from __future__ import annotations
 
+import hashlib
 import io
-import importlib.util
 import json
 import os
 import sys
 import tempfile
 import types
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_CANDIDATES = (
-    ROOT / "scripts" / "video_summary.py",
-    ROOT / ".agents" / "skill" / "video-summary-mindmap" / "scripts" / "video_summary.py",
-)
-SCRIPT = next(path for path in SCRIPT_CANDIDATES if path.exists())
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
 
 
-def load_module():
-    spec = importlib.util.spec_from_file_location("video_summary_under_test", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    spec.loader.exec_module(module)
-    return module
+def load_module() -> types.SimpleNamespace:
+    """Expose the canonical src package APIs under the regression test seam."""
+    if str(SRC_ROOT) not in sys.path:
+        sys.path.insert(0, str(SRC_ROOT))
 
+    from video_summary import artifacts, config, documents, llm, mermaid, outputs, sources
+    from video_summary import subtitles, summarization, transcription
+
+    return types.SimpleNamespace(
+        extract_document_text=documents.extract_document_text,
+        parse_subtitle_segments=subtitles.parse_subtitle_segments,
+        json_subtitle_to_segments=subtitles.json_subtitle_to_segments,
+        write_transcript_artifacts=artifacts.write_transcript_artifacts,
+        refresh_existing_segment_artifacts=artifacts.refresh_existing_segment_artifacts,
+        chapterize_from_files=summarization.chapterize_from_files,
+        load_domain_config=config.load_domain_config,
+        references_dir=config.REFERENCES_DIR,
+        local_source_id=sources.local_source_id,
+        slug_from_info=sources.slug_from_info,
+        keywords=summarization.keywords,
+        transcribe_audio_local=transcription.transcribe_audio_local,
+        default_transcribe_language=config.default_transcribe_language,
+        write_outputs=outputs.write_outputs,
+        build_llm_prompt=llm.build_llm_prompt,
+        build_lecture_chunk_prompt=llm.build_lecture_chunk_prompt,
+        urllib=llm.urllib,
+        time=llm.time,
+        os=llm.os,
+        call_llm=llm.call_llm,
+        should_chunk_lecture=llm.should_chunk_lecture,
+        split_transcript_for_llm=llm.split_transcript_for_llm,
+        write_chunk_summaries=artifacts.write_chunk_summaries,
+        load_existing_chunk_summaries=artifacts.load_existing_chunk_summaries,
+        build_mermaid=mermaid.build_mermaid,
+        json=json,
+    )
 
 class VideoSummaryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -128,6 +153,52 @@ class VideoSummaryTests(unittest.TestCase):
             chapters = self.module.chapterize_from_files(out_dir, "文本", 2)
         self.assertIn("[00:10]", timed)
         self.assertEqual(chapters[0]["time"], 10)
+
+    def test_local_source_ids_distinguish_same_name_and_extension_in_different_directories(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-source-id-unit-") as temp_dir:
+            root = Path(temp_dir)
+            left = root / "left" / "same-name.docx"
+            right = root / "right" / "same-name.docx"
+
+            self.assertNotEqual(
+                self.module.local_source_id(left),
+                self.module.local_source_id(right),
+            )
+            self.assertEqual(
+                self.module.local_source_id(left),
+                self.module.local_source_id(Path(str(left))),
+            )
+            self.assertNotIn("left", self.module.local_source_id(left))
+            self.assertNotIn("right", self.module.local_source_id(right))
+
+    def test_local_source_id_has_documented_filename_extension_and_path_hash_format(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-source-id-format-") as temp_dir:
+            source = Path(temp_dir) / "Lecture Notes.MP4"
+            normalized_path = os.path.normcase(str(source.expanduser().resolve(strict=False)))
+            expected_hash = hashlib.sha256(normalized_path.encode("utf-8")).hexdigest()[:8]
+
+            source_id = self.module.local_source_id(source)
+
+        self.assertEqual(source_id, f"Lecture Notes-mp4-{expected_hash}")
+        self.assertRegex(source_id, r"^Lecture Notes-mp4-[0-9a-f]{8}$")
+
+    def test_online_source_ids_keep_platform_identifier_behavior(self) -> None:
+        self.assertEqual(
+            self.module.slug_from_info(
+                {"id": "BV1abc123", "display_id": "video-title"},
+                "https://www.bilibili.com/video/BV1abc123/",
+            ),
+            "BV1abc123",
+        )
+
+    def test_runtime_references_are_inside_src_package(self) -> None:
+        expected = SRC_ROOT / "video_summary" / "references"
+
+        self.assertEqual(self.module.references_dir, expected)
+        self.assertTrue((expected / "domain_terms.json").is_file())
+        self.assertTrue((expected / "lecture_prompt.md").is_file())
+        self.assertTrue((expected / "refined_prompt.md").is_file())
+        self.assertNotIn(".agents", str(self.module.references_dir))
 
     def test_domain_terms_are_opt_in(self) -> None:
         self.module.load_domain_config("general")
@@ -311,6 +382,36 @@ class VideoSummaryTests(unittest.TestCase):
             timed = (out_dir / "transcript_timed.txt").read_text(encoding="utf-8")
         self.assertEqual(segments[0]["start"], 12.0)
         self.assertIn("[01:05]", timed)
+
+    def test_reuse_transcript_edit_invalidates_stale_transcript_and_chunk_caches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            old_transcript = "[00:12] 旧逐字稿第一段内容足够长。\n[01:05] 旧逐字稿第二段内容足够长。"
+            new_transcript = "编辑后的逐字稿已经替换旧内容，章节缓存和时间戳缓存都不能继续复用。"
+            self.module.write_transcript_artifacts(
+                out_dir,
+                old_transcript,
+                [
+                    {"start": 12, "end": 20, "text": "旧逐字稿第一段内容足够长。"},
+                    {"start": 65, "end": 75, "text": "旧逐字稿第二段内容足够长。"},
+                ],
+            )
+            (out_dir / "metadata.json").write_text(
+                json.dumps({"transcript_sha256": hashlib.sha256(old_transcript.encode("utf-8")).hexdigest()}),
+                encoding="utf-8",
+            )
+            (out_dir / "summary_chunks.json").write_text(
+                json.dumps([{"index": 1, "summary": "旧章节缓存"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            self.module.refresh_existing_segment_artifacts(out_dir, new_transcript)
+            chapters = self.module.chapterize_from_files(out_dir, new_transcript, 2)
+
+            self.assertFalse((out_dir / "transcript_segments.json").exists())
+            self.assertFalse((out_dir / "transcript_timed.txt").exists())
+            self.assertFalse((out_dir / "summary_chunks.json").exists())
+            self.assertNotIn("旧逐字稿", json.dumps(chapters, ensure_ascii=False))
 
 
 class FakeResponse:

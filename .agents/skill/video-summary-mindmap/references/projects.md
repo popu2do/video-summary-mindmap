@@ -6,4 +6,4 @@
 - `external/youtube-transcriber`: YouTube-focused local transcription and Markdown export reference.
 - `external/BiliGPT`: Bilibili/YouTube summary app reference.
 
-Use these repositories as implementation references only. Prefer the local skill script for routine execution.
+Use these repositories as implementation references only. For routine execution, use the repository's canonical CLI entry point `src/video_summary_cli.py`.
