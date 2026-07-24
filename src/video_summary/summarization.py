@@ -9,6 +9,7 @@ from .artifacts import read_segments_file
 from .mermaid import mindmap_text
 from .config import ACTIVE_DOMAIN_TERMS, ANALYSIS_SCOPE_NOTE, STOP_WORDS
 from .transcript import load_segments_from_text
+from .storage import TRANSCRIPT_SEGMENTS_FILENAME, internal_path
 
 def split_sentences(text: str) -> list[str]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -150,7 +151,7 @@ def resolve_content_type(value: str, info: dict[str, Any], source: str) -> str:
     return "video"
 
 def chapterize_from_files(out_dir: Path, transcript: str, chapters: int) -> list[dict[str, Any]]:
-    segments_path = out_dir / "transcript_segments.json"
+    segments_path = internal_path(out_dir, TRANSCRIPT_SEGMENTS_FILENAME)
     if segments_path.exists():
         try:
             data = json.loads(segments_path.read_text(encoding="utf-8"))

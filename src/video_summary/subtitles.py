@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import PREFERRED_LANGS, TEXT_EXTENSIONS, fail
+from .storage import internal_path
 from .transcript import coerce_seconds, normalize_segment_text, normalize_segments, normalize_text
 
 def choose_subtitle(info: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
@@ -36,7 +37,7 @@ def fetch_subtitle(entry: dict[str, Any], out_dir: Path, lang: str) -> Path:
     ext = f".{entry.get('ext') or 'txt'}".lower()
     if ext not in TEXT_EXTENSIONS:
         ext = ".txt"
-    target = out_dir / f"subtitle.{lang}{ext}"
+    target = internal_path(out_dir, f"subtitle.{lang}{ext}")
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(request, timeout=60) as response:
         target.write_bytes(response.read())

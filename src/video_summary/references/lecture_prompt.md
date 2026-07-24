@@ -62,11 +62,12 @@ mindmap
     复习问题
 ```
 
----
-
-## 整理后逐字稿
-保留原文结构，可修正明显 ASR 错字；不要删除重要论证。
 ```
+
+交付约束：
+- transcript 仅作分析依据，不是最终稿内容。
+- 最终稿不得包含完整逐字稿、全文转录或“整理后逐字稿”章节。
+- 只允许为说明关键观点引用 1-3 句原话，其余内容必须改写为精校课程笔记。
 
 Rules:
 - Prefer course-note structure over entertainment-style highlights.

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+from difflib import SequenceMatcher
 import os
+import re
 import time
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -20,10 +23,233 @@ from .config import (
     REFERENCES_DIR,
     fail,
 )
-from .mermaid import extract_mermaid
-from .outputs import format_duration
+from .mermaid import extract_mermaid, is_valid_mindmap, remove_bare_mindmaps
+from .outputs import archive_previous_final_outputs, clear_previous_final_outputs, format_duration
+from .storage import (
+    MINDMAP_FILENAME,
+    SUMMARY_DRAFT_FILENAME,
+    SUMMARY_FILENAME,
+    internal_path,
+)
+from .sources import is_remote_source, safe_display_name
 from .summarization import split_sentences
 from .subtitles import format_timestamp
+
+DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".odt", ".rtf"}
+TRANSCRIPT_SECTION_TERMS = (
+    "\u9010\u5b57\u7a3f",
+    "\u9010\u5b57\u8f6c\u5199",
+    "\u5b8c\u6574\u8f6c\u5199",
+    "\u539f\u59cb\u6587\u7a3f",
+    "transcript",
+    "transcription",
+)
+
+
+def is_document_source(source: str) -> bool:
+    path_without_query = str(source).split("?", 1)[0]
+    return Path(path_without_query).suffix.lower() in DOCUMENT_EXTENSIONS
+
+
+def transcript_source_label(source: str, subtitle_lang: str | None) -> str:
+    if is_document_source(source):
+        return "\u6587\u6863"
+    return subtitle_lang or "local transcription"
+
+
+def _prompt_source_name(source: str) -> str:
+    if is_remote_source(source):
+        return source
+    return safe_display_name(source)
+
+
+def _remove_transcript_sections(summary: str) -> str:
+    lines = summary.splitlines()
+    kept: list[str] = []
+    skipped_level: int | None = None
+    heading_pattern = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+    for line in lines:
+        heading = heading_pattern.match(line)
+        if skipped_level is not None:
+            if heading and len(heading.group(1)) <= skipped_level:
+                skipped_level = None
+            else:
+                continue
+        if heading:
+            heading_title = heading.group(2).lower()
+            if any(term in heading_title for term in TRANSCRIPT_SECTION_TERMS):
+                skipped_level = len(heading.group(1))
+                continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _path_variants(value: str) -> set[str]:
+    return {value, value.replace("\\", "/"), value.replace("/", "\\")}
+
+
+def _remove_local_parent_paths(summary: str, source: str) -> str:
+    if is_remote_source(source):
+        return summary
+
+    source_path = Path(source)
+    display_name = _prompt_source_name(source)
+    source_variants = _path_variants(str(source)) | _path_variants(str(source_path))
+    parent_variants = _path_variants(str(source_path.parent))
+
+    sanitized = summary
+    for value in sorted(source_variants, key=len, reverse=True):
+        sanitized = sanitized.replace(value, display_name)
+    for value in sorted(parent_variants, key=len, reverse=True):
+        sanitized = sanitized.replace(value + "\\", "").replace(value + "/", "").replace(value, "")
+    return sanitized
+
+
+def _prepare_final_summary(summary: str, source: str) -> str:
+    final_summary = _remove_local_parent_paths(summary.strip(), source)
+    final_summary = _remove_transcript_sections(final_summary)
+    if is_document_source(source):
+        final_summary = re.sub(
+            r"(?im)^\s*(?:[-*]\s*)?(?:\u6587\u7a3f\u6765\u6e90|transcript\s+source)\s*[:：].*$",
+            "- \u6587\u7a3f\u6765\u6e90：\u6587\u6863",
+            final_summary,
+        )
+    return final_summary.strip()
+
+
+def _without_mermaid(summary: str) -> str:
+    without_fenced = re.sub(
+        r"```mermaid\b.*?(?:```|\Z)",
+        "",
+        summary,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Only remove a standalone Mermaid mindmap block. A normal sentence that
+    # mentions "mindmap" must not consume the rest of the final summary.
+    return re.sub(
+        r"(?im)^\s*mindmap\s*$\r?\n(?:[ \t]+.*(?:\r?\n|$))*",
+        "",
+        without_fenced,
+    ).strip()
+
+
+def _normalized_text(value: str) -> str:
+    return re.sub(r"\s+", "", value).casefold()
+
+
+def _summary_without_markdown_headings(summary: str) -> str:
+    lines = summary.splitlines()
+    body: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if re.match(r"^\s*#{1,6}\s+\S", line):
+            index += 1
+            continue
+        if (
+            line.strip()
+            and index + 1 < len(lines)
+            and re.fullmatch(r"\s*(?:=+|-+)\s*", lines[index + 1])
+        ):
+            index += 2
+            continue
+        body.append(line)
+        index += 1
+    return "\n".join(body).strip()
+
+
+def _normalized_refusal_text(value: str) -> str:
+    compact = _summary_without_markdown_headings(value).casefold().replace("’", "'")
+    return re.sub(r"[\s，,：:；;。.!！?？\']+", "", compact)
+
+
+def _has_markdown_title(summary: str) -> bool:
+    return bool(re.search(r"(?m)^\s*#{1,6}\s+\S", summary))
+
+
+def _looks_like_refusal_or_invalid_short_text(summary: str) -> bool:
+    compact = _normalized_refusal_text(summary)
+    refusal_prefixes = (
+        "抱歉我无法",
+        "很抱歉我无法",
+        "对不起我无法",
+        "我无法完成",
+        "我不能完成",
+        "无法生成总结",
+        "无法完成总结",
+        "无法提供总结",
+        "imsorryicant",
+        "imsorryicannot",
+        "sorryicant",
+        "sorryicannot",
+        "icantprovideasummary",
+        "icannotprovideasummary",
+        "icantsummarize",
+        "icannotsummarize",
+        "imunabletosummarize",
+    )
+    if any(compact.startswith(prefix) for prefix in refusal_prefixes):
+        return True
+
+    # Reject only obvious acknowledgement tokens, not every short untitled
+    # sentence. This keeps concise but meaningful summaries publishable.
+    short_token = re.sub(r"[^\w]+", "", compact)
+    return short_token in {"好", "好的", "收到", "明白", "谢谢", "ok", "okay", "done", "sure"}
+
+
+def _summary_body_for_copy(summary: str) -> str:
+    lines: list[str] = []
+    for line in _summary_without_markdown_headings(summary).splitlines():
+        lines.append(re.sub(r"^\s*(?:[-*+]\s+|>\s?|\d+[.)]\s+)", "", line))
+    return "\n".join(lines).strip()
+
+
+def _is_high_copy_without_title(summary: str, transcript: str) -> bool:
+    normalized_summary = _normalized_text(_summary_body_for_copy(summary))
+    normalized_transcript = _normalized_text(transcript)
+    if len(normalized_transcript) < 40 or not normalized_summary:
+        return False
+    if normalized_transcript in normalized_summary:
+        return True
+
+    ratio = SequenceMatcher(None, normalized_summary, normalized_transcript).ratio()
+    large_copy = len(normalized_summary) >= max(40, int(len(normalized_transcript) * 0.6))
+    return large_copy and ratio >= 0.85
+
+
+_LOCAL_WINDOWS_PATH = re.compile(
+    r"(?<![\w])(?:[A-Za-z]:[\\/](?:[^\r\n`<>\"|]*)?|\\\\(?:[^\r\n`<>\"|]*)?)"
+)
+_LOCAL_UNIX_PATH = re.compile(
+    r"(?<![\w:/])/(?:[^/\s`<>\"']+/)*[^/\s`<>\"']*"
+)
+
+
+def _contains_local_absolute_path(summary: str) -> bool:
+    return bool(_LOCAL_WINDOWS_PATH.search(summary) or _LOCAL_UNIX_PATH.search(summary))
+
+
+def _validate_final_summary(summary: str | None, transcript: str) -> None:
+    if not isinstance(summary, str) or not summary.strip():
+        fail("LLM 返回为空，无法发布最终稿。")
+
+    if _contains_local_absolute_path(summary):
+        fail("LLM 返回包含本机绝对路径，无法发布最终稿。")
+
+    meaningful_summary = _without_mermaid(summary)
+    if not meaningful_summary:
+        fail("LLM 返回仅包含 Mermaid 脑图，无法发布最终稿。")
+    if not _summary_without_markdown_headings(meaningful_summary):
+        fail("LLM 返回缺少实质摘要正文，无法发布最终稿。")
+    if _looks_like_refusal_or_invalid_short_text(meaningful_summary):
+        fail("LLM 返回疑似拒答或无效短文本，无法发布最终稿。")
+    if _contains_local_absolute_path(meaningful_summary):
+        fail("LLM 返回包含本机绝对路径，无法发布最终稿。")
+    if _normalized_text(meaningful_summary) == _normalized_text(transcript):
+        fail("LLM 返回仅复制逐字稿，无法发布最终稿。")
+    if _is_high_copy_without_title(meaningful_summary, transcript):
+        fail("LLM 返回高度复制逐字稿，无法发布最终稿。")
+
 
 def should_chunk_lecture(transcript: str, max_chars: int) -> bool:
     """Keep lecture requests below the provider timeout-prone payload size."""
@@ -83,6 +309,7 @@ def build_lecture_chunk_prompt(
     chunk_count: int,
     chunk: dict[str, Any],
 ) -> str:
+    display_name = _prompt_source_name(source)
     return f"""You are summarizing one chronological chunk of a long Chinese lecture.
 
 Return concise Markdown only. Preserve timestamps when present. Capture:
@@ -94,11 +321,11 @@ Return concise Markdown only. Preserve timestamps when present. Capture:
 
 Video metadata:
 - title: {title}
-- url: {source}
+- url: {display_name}
 - author: {author}
 - duration: {duration}
-- transcript source: {subtitle_lang or 'local transcription'}
-- analysis basis: subtitle/audio transcript only; no OCR, screenshots, or visual scene understanding
+- transcript source: {transcript_source_label(source, subtitle_lang)}
+- analysis basis: {("document text from a text-layer PDF or OOXML document; no audio transcription, OCR, screenshots, or visual scene understanding" if is_document_source(source) else "subtitle/audio transcript only; no OCR, screenshots, or visual scene understanding")}
 - chunk: {chunk_index}/{chunk_count}
 - chunk time: {format_timestamp(chunk.get('start'))} - {format_timestamp(chunk.get('end'))}
 
@@ -116,20 +343,31 @@ def build_llm_prompt(
     draft_summary: str,
     content_type: str,
 ) -> str:
+    display_name = _prompt_source_name(source)
     prompt_file = "lecture_prompt.md" if content_type == "lecture" else "refined_prompt.md"
     prompt_path = REFERENCES_DIR / prompt_file
     instructions = prompt_path.read_text(encoding="utf-8", errors="ignore") if prompt_path.exists() else ""
+    document_instruction = (
+        "\u6700\u7ec8\u7a3f\u53ea\u4fdd\u7559\u7cbe\u4fee\u603b\u7ed3\u7ed3\u6784\uff0c\u4e0d\u5f97\u8f93\u51fa\u5b8c\u6574\u9010\u5b57\u7a3f\u3001\u5168\u6587\u8f6c\u5f55\u6216\u7b49\u4ef7 transcript\uff1b\u5b8c\u6574\u4f9d\u636e\u6750\u6599\u53ea\u4fdd\u7559\u5728 support/transcript.txt\u3002"
+    )
+    analysis_basis = (
+        "document text from a text-layer PDF or OOXML document; no audio transcription, OCR, screenshots, or visual scene understanding"
+        if is_document_source(source)
+        else "subtitle/audio transcript only; no OCR, screenshots, or visual scene understanding"
+    )
     return f"""{instructions}
+
+{document_instruction}
 
 Now produce the final Markdown directly. Do not wrap the whole answer in a code block.
 
 Video metadata:
 - title: {title}
-- url: {source}
+- url: {display_name}
 - author: {author}
 - duration: {duration}
-- transcript source: {subtitle_lang or 'local transcription'}
-- analysis basis: subtitle/audio transcript only; no OCR, screenshots, or visual scene understanding
+- transcript source: {transcript_source_label(source, subtitle_lang)}
+- analysis basis: {analysis_basis}
 - content type: {content_type}
 
 Draft summary, if useful:
@@ -270,6 +508,69 @@ def refine_long_lecture_with_llm(
     )
     return call_llm(prompt, model=model, api_kind=api_kind)
 
+def _stage_bytes_file(out_dir: Path, filename: str, content: bytes) -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=out_dir,
+        prefix=f".{filename}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+        return Path(handle.name)
+
+
+def _stage_text_file(out_dir: Path, filename: str, content: str) -> Path:
+    return _stage_bytes_file(out_dir, filename, content.encode("utf-8"))
+
+
+def _publish_final_outputs(out_dir: Path, summary: str, mindmap: str | None = None) -> None:
+    summary_path = out_dir / SUMMARY_FILENAME
+    mindmap_path = out_dir / MINDMAP_FILENAME
+    targets: list[tuple[Path, bytes | None]] = [
+        (summary_path, summary.encode("utf-8")),
+    ]
+    if mindmap is not None:
+        targets.append((mindmap_path, mindmap.encode("utf-8")))
+    elif mindmap_path.is_file():
+        # A summary-only refinement must not leave an older mindmap looking
+        # like it belongs to the newly published summary.
+        targets.append((mindmap_path, None))
+    staged: dict[Path, Path] = {}
+    backups: dict[Path, Path] = {}
+    moved_backups: list[Path] = []
+    published: list[Path] = []
+    try:
+        for target, content in targets:
+            if content is not None:
+                staged[target] = _stage_bytes_file(out_dir, target.name, content)
+        for target, _ in targets:
+            if target.is_file():
+                backups[target] = _stage_bytes_file(out_dir, target.name, target.read_bytes())
+        for target, _ in targets:
+            backup = backups.get(target)
+            if backup is not None:
+                os.replace(target, backup)
+                moved_backups.append(target)
+        for target, _ in targets:
+            staged_path = staged.get(target)
+            if staged_path is not None:
+                os.replace(staged_path, target)
+                published.append(target)
+    except Exception:
+        for target in reversed(published):
+            target.unlink(missing_ok=True)
+        for target in reversed(moved_backups):
+            backup = backups[target]
+            if backup.exists():
+                os.replace(backup, target)
+        raise
+    finally:
+        for path in (*staged.values(), *backups.values()):
+            path.unlink(missing_ok=True)
+
 def refine_with_llm(
     info: dict[str, Any],
     source: str,
@@ -280,7 +581,12 @@ def refine_with_llm(
     api_kind: str,
     max_chars: int,
     content_type: str,
-) -> None:
+) -> str | None:
+    if (out_dir / SUMMARY_FILENAME).is_file() or (out_dir / MINDMAP_FILENAME).is_file():
+        # A failed quality gate must not leave a previous final looking like
+        # the result of the current refinement attempt.
+        archive_previous_final_outputs(out_dir)
+
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         fail("启用 --llm-refine 需要设置 OPENAI_API_KEY。--use-codex-config 只读取模型和 base URL，不读取 Codex 登录凭据。")
@@ -288,7 +594,8 @@ def refine_with_llm(
     title = str(info.get("title") or "未命名视频")
     author = str(info.get("uploader") or info.get("channel") or "未知")
     duration = format_duration(info.get("duration"))
-    draft_summary = (out_dir / "summary.md").read_text(encoding="utf-8", errors="ignore") if (out_dir / "summary.md").exists() else ""
+    draft_summary_path = internal_path(out_dir, SUMMARY_DRAFT_FILENAME)
+    draft_summary = draft_summary_path.read_text(encoding="utf-8", errors="ignore") if draft_summary_path.exists() else ""
     if content_type == "lecture" and should_chunk_lecture(transcript, max_chars):
         refined = refine_long_lecture_with_llm(
             title=title,
@@ -315,8 +622,22 @@ def refine_with_llm(
             content_type=content_type,
         )
         refined = call_llm(prompt, model=model, api_kind=api_kind)
-    refined_path = out_dir / "summary_refined.md"
-    refined_path.write_text(refined.strip() + "\n", encoding="utf-8")
-    mermaid = extract_mermaid(refined)
-    if mermaid:
-        (out_dir / "mindmap_refined.mmd").write_text(mermaid.strip() + "\n", encoding="utf-8")
+
+    final_summary = _prepare_final_summary(refined, source) if isinstance(refined, str) else refined
+    _validate_final_summary(final_summary, transcript)
+    candidate_mindmap = extract_mermaid(final_summary).strip()
+    final_mindmap = candidate_mindmap if is_valid_mindmap(candidate_mindmap) else ""
+    if isinstance(final_summary, str):
+        final_summary = remove_bare_mindmaps(final_summary).strip()
+    if _contains_local_absolute_path(final_mindmap):
+        fail("LLM 返回包含本机绝对路径，无法发布最终稿。")
+    _publish_final_outputs(
+        out_dir,
+        final_summary + "\n",
+        final_mindmap + "\n" if final_mindmap else None,
+    )
+    try:
+        clear_previous_final_outputs(out_dir)
+    except Exception as error:
+        return f"最终稿已发布但后续归档清理失败：{SUMMARY_FILENAME}；{error}"
+    return None

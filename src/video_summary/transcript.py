@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import html
 import re
 from typing import Any
 
 from .config import ACTIVE_DOMAIN_REPLACEMENTS
-
-def transcript_sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 def normalize_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []

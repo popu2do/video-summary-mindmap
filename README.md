@@ -1,27 +1,26 @@
 # Video Summary Mindmap
 
-Generate transcripts, structured Markdown notes, and Mermaid mind maps from
-Bilibili or YouTube URLs, local audio and local video files, PDFs, and OOXML Word documents.
+Generate source transcripts, one final Markdown summary, and an optional Mermaid
+mind map from Bilibili or YouTube URLs, local audio/video files, PDFs, and OOXML
+Word documents.
 
-The workflow is subtitle-first and transcription-backed: it tries to reuse
-available subtitles, falls back to local audio transcription when needed, and
-can optionally call an OpenAI-compatible LLM to produce polished course notes or
-video summaries.
+The workflow first prepares transcript support material. Use the `Delivery decision`
+section below to decide whether a run produced a hand-off artifact.
 
-> Scope: summaries are based only on subtitles or audio transcription. The tool
-> does not perform OCR, screenshot analysis, or visual scene understanding.
+> Scope: summaries are based on subtitles, audio transcription, or extracted
+> document text. Only PDFs with an extractable text layer are supported; image-only
+> PDFs are rejected with a readable non-zero error. The tool does not perform
+> screenshot analysis or visual scene understanding.
 
 ## Features
 
 - Extract subtitles with `yt-dlp` when platform captions are available.
 - Transcribe local audio with `faster-whisper` when subtitles are missing or
   explicitly ignored.
-- Read local audio and local video files, PDFs, and OOXML Word documents (`.doc`/`.docx`)
-  directly into the same transcript, summary, and mind-map workflow.
-- Generate deterministic offline outputs: `summary.md`, `mindmap.mmd`, and
-  transcript artifacts.
-- Optionally generate LLM-polished outputs: `summary_refined.md` and
-  `mindmap_refined.mmd`.
+- Read local audio and local video files, text-layer PDFs, and OOXML Word documents
+  (`.doc`/`.docx`) into the same transcript and final-delivery workflow.
+- Prepare transcript support material and internal drafts for inspection and reruns.
+- Use `--llm-refine` when a final delivery is required.
 - Reuse existing transcripts for fast iteration with `--reuse-transcript`.
 - Preserve timestamped transcript segments for chaptering and long-video
   chunking.
@@ -55,7 +54,8 @@ configuration, and optional LLM refinement.
 ## Requirements and Access
 
 - Python 3.12 is recommended for `faster-whisper` compatibility.
-- PDF input requires the `pypdf` dependency. `.doc` files must be OOXML
+- PDF input requires `pypdf` and must contain an extractable text layer.
+  Image-only or scanned PDFs are not supported. `.doc` files must be OOXML
   containers (some Word exports use the `.doc` suffix for this format).
 - FFmpeg must be installed and available on `PATH` when audio download or
   transcription is needed.
@@ -87,8 +87,8 @@ Additional setup is scenario-specific:
   require login, rate-limit requests, or be unavailable from some networks.
   Restricted videos may require an installed browser profile and
   `--cookies-from-browser edge|chrome|firefox`.
-- LLM-polished output requires a reachable OpenAI-compatible API endpoint,
-  matching `OPENAI_API_KIND`, and a valid API key.
+- Final delivery requires a reachable OpenAI-compatible API endpoint, matching
+  `OPENAI_API_KIND`, and a valid API key.
 
 ## Configuration
 
@@ -124,70 +124,70 @@ Optional local transcription settings:
 
 ## Quick Start
 
-Fast local draft:
+Prepare transcript/support material only (no final deliverable):
 
 ```powershell
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "https://www.bilibili.com/video/BVxxxx/" --local-whisper-model tiny --template compact
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "VIDEO_URL"
 ```
 
-Better local transcription quality:
+Prepare higher-quality transcript/support material only:
 
 ```powershell
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "https://www.bilibili.com/video/BVxxxx/" --local-whisper-model small --template refined
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "VIDEO_URL" --local-whisper-model small --template refined
 ```
 
-Generate polished output with an OpenAI-compatible LLM after a prior run has
-created `output/<source-id>/transcript.txt`:
+Generate the final delivery with an OpenAI-compatible LLM:
 
 ```powershell
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "https://www.bilibili.com/video/BVxxxx/" --template refined --llm-refine
-# Later rerun, only when output/<source-id>/transcript.txt already exists:
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "https://www.bilibili.com/video/BVxxxx/" --reuse-transcript --template refined --llm-refine
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "VIDEO_URL" --llm-refine
 ```
 
-Generate Chinese course or livestream notes:
+Generate final Chinese course or livestream notes:
 
 ```powershell
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Videos/course.mp4" --template refined --content-type lecture --domain zh-social --language zh --llm-refine
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Videos/course.mp4" --content-type lecture --domain zh-social --language zh --llm-refine
 ```
 
-Process a local PDF or OOXML Word document:
+Prepare a local PDF or OOXML Word transcript, then generate its final delivery:
 
 ```powershell
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.pdf" --template refined --content-type lecture --language zh
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.doc" --template refined --content-type lecture --language zh
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.docx" --template refined --content-type lecture --language zh
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.pdf"
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.pdf" --reuse-transcript --llm-refine
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.docx"
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.docx" --reuse-transcript --llm-refine
 ```
 
-Document inputs use the same `output/<source-id>/` layout as video inputs.
-The accepted local document formats are PDF and OOXML Word; a legacy binary `.doc`
-file is rejected even though the `.doc` suffix is accepted for OOXML containers.
-The extracted text is written to `transcript.txt`, so `--reuse-transcript` can
-be used for later summary or LLM-refinement reruns without reading the document
-again.
+Image-only or scanned PDFs without an extractable text layer are not
+supported. The CLI exits non-zero during `PDF/DOCX文本提取` with a readable
+message and does not fall back to audio download or local transcription.
 
-Analyze a local media file:
+After editing `support/transcript.txt`, reuse it for a final rerun:
 
 ```powershell
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Videos/example.mp4" --local-whisper-model small --language auto --template refined
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "D:/Documents/lecture.pdf" --reuse-transcript --llm-refine
 ```
+
+Document inputs use the same `output/<source-id>/` layout as video inputs. The
+extracted text is written to `support/transcript.txt`, which is support material
+for review and later reruns, never the final summary. `--reuse-transcript` only
+supports local files, not URLs, and requires an existing `support/transcript.txt`
+or legacy root-level `transcript.txt`; if both locations are missing, the command
+fails before reading or processing the source.
 
 Use browser cookies when the platform requires login:
 
 ```powershell
-& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "VIDEO_URL" --cookies-from-browser edge --template refined
+& ".venv/Scripts/python.exe" "src/video_summary_cli.py" "VIDEO_URL" --cookies-from-browser edge --llm-refine
 ```
 
 ## Recommended Workflow
 
-1. Run once with subtitle extraction or local transcription.
-2. Inspect and optionally edit `output/<source-id>/transcript.txt`.
-3. Rerun with `--reuse-transcript` only after that file already exists; the source
-   must still resolve to the same `<source-id>` and `--out-root` must be the same.
-   If `transcript.txt` is missing, the current CLI emits a warning and falls back
-   to ordinary source processing; this documents the current behavior and does not
-   change the source code.
-4. Add `--llm-refine` when you need the polished delivery files.
+1. Run once without `--llm-refine` to prepare `support/transcript.txt` and internal
+   support material.
+2. Inspect and optionally edit `output/<source-id>/support/transcript.txt`.
+3. Rerun with the same local source and `--reuse-transcript --llm-refine`.
+4. Apply the delivery decision below: first verify a successful CLI exit, then open
+   `output/<source-id>/summary.md`.
 
 For Chinese course content, `--language zh` can be more stable than automatic
 detection. For mixed-language, English, or Japanese videos, keep the default
@@ -196,8 +196,9 @@ detection. For mixed-language, English, or Japanese videos, keep the default
 Template distinction: `compact` is the concise deterministic/offline draft with
 core points, an outline, key terms, and a mind map; `refined` is the richer
 structured deterministic template with abstract, highlights, questions, term
-explanations, chapter summaries, mind map, and transcript. `--template refined`
-does not call an LLM; add `--llm-refine` separately for semantic polishing.
+explanations, chapter summaries, and a mind map. Neither draft contains the
+complete transcript. `--template refined` does not call an LLM; add
+`--llm-refine` separately for semantic polishing.
 
 ## Outputs
 
@@ -207,81 +208,36 @@ By default, outputs are written to:
 output/<source-id>/
 ```
 
-`<source-id>` identifies the source, and the directory keeps the output files
-flat under that root. Use `--out-root` to choose a different relative or absolute output root while
-preserving the same `<source-id>/` layout. This directory receives transcripts,
-metadata, and sometimes downloaded audio, so treat it as private data: do not point
-it at a public, shared, or synchronized folder, and do not commit a custom root
-unless it is explicitly protected by your ignore rules.
+`<source-id>` identifies the source. Use `--out-root` to choose a different
+relative or absolute output root while preserving the same `<source-id>/` layout.
+Treat this directory as private data: it can contain transcripts and internal
+processing artifacts, so do not point it at a public, shared, or synchronized
+folder and do not commit it.
 
-Generated for each successful run:
+### Delivery decision
 
-```text
-metadata.json
-transcript.txt
-summary.md
-mindmap.mmd
-```
-
-### Output role contract
-
-The output directory remains flat under `output/<source-id>/`. The following
-contract is the single source of truth for file roles:
-
-- **核心交付 (core delivery)**: `transcript.txt`, `summary.md`, `mindmap.mmd`,
-  and `metadata.json`. These are the primary handoff files.
-- **可选派生 (optional derived)**: `transcript_segments.json`,
-  `transcript_timed.txt`, `summary_refined.md`, and `mindmap_refined.mmd`.
-  Timestamped files are generated only when timestamped segments are available;
-  refined files require `--llm-refine`.
-- **中间缓存 (intermediate cache)**: `summary_chunks.json`, `audio.mp3`, and
-  `transcription.json`. `summary_chunks.json` supports resumable long-lecture
-  refinement, `audio.mp3` is downloaded only for online transcription, and
-  `transcription.json` only stores transcription metadata; it is an intermediate
-  artifact, not a core delivery file.
-
-`transcription.json` does not automatically include timestamped `segments`.
-Timestamped segments are written to `transcript_segments.json` and
-`transcript_timed.txt`.
-
-When `--reuse-transcript` reads an edited `transcript.txt`, the CLI records its
-SHA-256 in `metadata.json`. If the hash differs or is unavailable, it removes
-`transcript_segments.json`, `transcript_timed.txt`, `summary_chunks.json`, and
-`transcription.json`, then rebuilds applicable derived data from the current
-transcript. It also
-removes stale `summary_refined.md` and `mindmap_refined.mmd`; reruns without
-`--llm-refine` do not recreate those polished files. A matching hash preserves
-existing timestamped transcript reuse behavior.
+1. **先看 CLI 是否成功退出。** 只有成功退出才算本次交付有效；失败、非零退出，
+   或 LLM 没有返回可用摘要时，都不能把残留文件当最终稿。
+2. **再打开 `output/<source-id>/summary.md`。** 它是唯一必需的最终稿。
+3. `mindmap.mmd` 仅是可选最终伴随物；LLM 没有返回有效 Mermaid 时可以不存在。
+4. `support/transcript.txt` 仅为依据/支持材料，不是最终稿。
+5. `_internal/`（包括 `_internal/previous_final/`）是草稿、缓存和历史内部状态，
+   不交付给用户。
+6. 没有 `--llm-refine` 时不产生最终稿；即使目录里有旧文件或草稿，也不能视为本次交付。
 
 ### Source ID rules
 
 `<source-id>` 的规则按来源类型区分：
 
 - 在线来源继续使用平台返回的 `id`/`display_id`（例如 `BV1xxxx`），不改变在线来源的复用方式。
-- 本地文件使用 `<安全化文件名>-<扩展名>-<短哈希>`，例如
-  `lecture-mp4-1a2b3c4d`。短哈希取规范化绝对路径的 SHA-256 前 8 位，
+- 本地文件使用基于安全化文件名、扩展名和来源路径的稳定 source-id，
   只用于隔离同名文件，不把原始路径写入输出目录名。无扩展名文件省略扩展名段。
+  对 PDF/DOC/DOCX 等文档，用户可见的来源标签和发送给 LLM 的来源字段只使用
+  脱敏后的文件名/标题，不展示本地父目录或完整路径。
 - 因此，两个不同目录中的 `same-name.docx` 会得到不同的 source-id；
   不同扩展名也继续保持隔离。使用 `--reuse-transcript` 时，应继续使用同一
-  本地路径和同一 `--out-root`，这样才能定位到原来的 `transcript.txt`。
-
-Output roles:
-
-- `transcript.txt`: normalized transcript used by summaries.
-- `transcript_segments.json`: timestamped transcript segments when available.
-- `transcript_timed.txt`: readable timestamped transcript.
-- `summary.md`: deterministic offline extractive draft.
-- `mindmap.mmd`: deterministic Mermaid mind map.
-- `summary_refined.md`: optional LLM-polished delivery file.
-- `mindmap_refined.mmd`: Mermaid extracted from the polished summary.
-- `summary_chunks.json`: resumable intermediate chunk summaries for long
-  lecture refinement. Lecture requests are split into chunks of at most 12,000
-  characters before the final merge to avoid provider request timeouts.
-- `audio.mp3`: downloaded audio for online media transcription; local media is
-  read directly and is not copied to `audio.mp3`.
-- `metadata.json`: source metadata, analysis scope, and transcript content hash.
-- `transcription.json`: transcription metadata/intermediate artifact; it is not a
-  core delivery file and may be absent or present depending on the processing path.
+  本地路径和同一 `--out-root`，这样才能定位到原来的
+  `support/transcript.txt`（或兼容读取旧根层 `transcript.txt`）。
 
 ## CLI Options
 
@@ -290,13 +246,13 @@ Frequently used options:
 ```text
 --out-root PATH                Write to PATH/<source-id>/; keep it private.
 --force-transcribe             Ignore subtitles and transcribe audio; cannot combine with --reuse-transcript.
---reuse-transcript             Rebuild from an existing output transcript.txt; not a first run; cannot combine with --force-transcribe.
+--reuse-transcript             Rebuild from existing support/transcript.txt (or legacy root transcript.txt); fail if both are missing; cannot combine with --force-transcribe.
 --local-whisper-model small    Choose faster-whisper model size.
 --language auto|zh|en|ja       Choose or auto-detect transcription language.
---template compact|refined     Choose the concise compact or richer refined template.
+--template compact|refined     Choose the internal draft template.
 --content-type auto|video|lecture
 --domain general|zh-social
---llm-refine                   Generate semantic polished outputs.
+--llm-refine                   Publish summary.md and optional mindmap.mmd after success.
 --llm-api responses|chat
 --use-codex-config             Reuse non-secret Codex model/base URL settings.
 ```
@@ -347,15 +303,16 @@ notes should stay outside version control.
 
 ## Limitations
 
-- This is not a multimodal video-understanding tool. It does not inspect frames,
-  OCR on-screen text, or infer information from visuals.
+- This is not a multimodal video-understanding tool. It does not inspect video
+  frames, perform OCR on image-only PDFs, analyze screenshots, or infer
+  chart/scene meaning.
 - Local transcription quality depends on audio quality, speaker clarity,
   language choice, and the selected Whisper model.
-- `summary.md` is deterministic and cheap, but it is not a substitute for
-  human review or LLM polishing.
+- Delivery boundaries are defined in the `Delivery decision` section above; drafts,
+  support material, and internal state are never substitutes for the final `summary.md`.
 - Long-video LLM refinement can still fail if the provider rejects requests or
   credentials are misconfigured, though transient `429` and `5xx` failures are
-  retried.
+  retried. After failure, do not deliver the transcript, drafts, caches, or archive.
 
 ## Prior Art and References
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -30,6 +29,7 @@ def load_module() -> types.SimpleNamespace:
         json_subtitle_to_segments=subtitles.json_subtitle_to_segments,
         write_transcript_artifacts=artifacts.write_transcript_artifacts,
         refresh_existing_segment_artifacts=artifacts.refresh_existing_segment_artifacts,
+        fetch_subtitle=subtitles.fetch_subtitle,
         chapterize_from_files=summarization.chapterize_from_files,
         load_domain_config=config.load_domain_config,
         references_dir=config.REFERENCES_DIR,
@@ -39,12 +39,15 @@ def load_module() -> types.SimpleNamespace:
         transcribe_audio_local=transcription.transcribe_audio_local,
         default_transcribe_language=config.default_transcribe_language,
         write_outputs=outputs.write_outputs,
+        prepare_output_directory=outputs.prepare_output_directory,
         build_llm_prompt=llm.build_llm_prompt,
         build_lecture_chunk_prompt=llm.build_lecture_chunk_prompt,
         urllib=llm.urllib,
         time=llm.time,
         os=llm.os,
         call_llm=llm.call_llm,
+        llm_module=llm,
+        refine_with_llm=llm.refine_with_llm,
         should_chunk_lecture=llm.should_chunk_lecture,
         split_transcript_for_llm=llm.split_transcript_for_llm,
         write_chunk_summaries=artifacts.write_chunk_summaries,
@@ -99,6 +102,37 @@ class VideoSummaryTests(unittest.TestCase):
                 sys.modules["pypdf"] = original
         self.assertEqual(text, "PDF 第一页")
 
+    def test_extract_image_only_pdf_is_rejected_without_ocr(self) -> None:
+        from video_summary.config import UserFacingError
+
+        fake_pypdf = types.ModuleType("pypdf")
+
+        class Page:
+            def extract_text(self):
+                return ""
+
+        class PdfReader:
+            def __init__(self, path):
+                self.pages = [Page()]
+
+        fake_pypdf.PdfReader = PdfReader
+        original = sys.modules.get("pypdf")
+        sys.modules["pypdf"] = fake_pypdf
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "image-only.pdf"
+                path.write_bytes(b"%PDF-image-only")
+                with self.assertRaises(UserFacingError) as raised:
+                    self.module.extract_document_text(path)
+        finally:
+            if original is None:
+                sys.modules.pop("pypdf", None)
+            else:
+                sys.modules["pypdf"] = original
+
+        self.assertIn("图像型 PDF", raised.exception.message)
+        self.assertIn("文本层", raised.exception.message)
+
     def test_vtt_segments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "sample.vtt"
@@ -149,7 +183,7 @@ class VideoSummaryTests(unittest.TestCase):
                 {"start": 70, "end": 80, "text": "这是第二段足够长的字幕内容，用于生成章节摘要。"},
             ]
             self.module.write_transcript_artifacts(out_dir, "文本", segments)
-            timed = (out_dir / "transcript_timed.txt").read_text(encoding="utf-8")
+            timed = (out_dir / "_internal" / "transcript_timed.txt").read_text(encoding="utf-8")
             chapters = self.module.chapterize_from_files(out_dir, "文本", 2)
         self.assertIn("[00:10]", timed)
         self.assertEqual(chapters[0]["time"], 10)
@@ -170,17 +204,6 @@ class VideoSummaryTests(unittest.TestCase):
             )
             self.assertNotIn("left", self.module.local_source_id(left))
             self.assertNotIn("right", self.module.local_source_id(right))
-
-    def test_local_source_id_has_documented_filename_extension_and_path_hash_format(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-source-id-format-") as temp_dir:
-            source = Path(temp_dir) / "Lecture Notes.MP4"
-            normalized_path = os.path.normcase(str(source.expanduser().resolve(strict=False)))
-            expected_hash = hashlib.sha256(normalized_path.encode("utf-8")).hexdigest()[:8]
-
-            source_id = self.module.local_source_id(source)
-
-        self.assertEqual(source_id, f"Lecture Notes-mp4-{expected_hash}")
-        self.assertRegex(source_id, r"^Lecture Notes-mp4-[0-9a-f]{8}$")
 
     def test_online_source_ids_keep_platform_identifier_behavior(self) -> None:
         self.assertEqual(
@@ -248,6 +271,23 @@ class VideoSummaryTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TRANSCRIBE_LANGUAGE": "chinese"}, clear=True):
             self.assertEqual(self.module.default_transcribe_language(), "auto")
 
+    def test_fetched_subtitles_are_internal_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = "WEBVTT\n\n00:00.000 --> 00:01.000\n字幕内容\n".encode("utf-8")
+            with mock.patch.object(self.module.urllib.request, "urlopen", return_value=response):
+                target = self.module.fetch_subtitle(
+                    {"url": "https://example.test/subtitle", "ext": "vtt"},
+                    out_dir,
+                    "zh-Hans",
+                )
+
+            self.assertEqual(target, out_dir / "_internal" / "subtitle.zh-Hans.vtt")
+            self.assertTrue(target.is_file())
+            self.assertEqual(list(out_dir.glob("subtitle.*")), [])
+
     def test_outputs_include_analysis_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             out_dir = Path(temp_dir)
@@ -260,10 +300,10 @@ class VideoSummaryTests(unittest.TestCase):
                 "zh",
                 "compact",
             )
-            metadata = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
-            summary = (out_dir / "summary.md").read_text(encoding="utf-8")
-        self.assertEqual(metadata["analysis_basis"], "subtitle_or_audio_only")
-        self.assertIn("仅基于字幕/音频转写", summary)
+            metadata = json.loads((out_dir / "_internal" / "metadata.json").read_text(encoding="utf-8"))
+            summary = (out_dir / "_internal" / "summary_draft.md").read_text(encoding="utf-8")
+        self.assertEqual(metadata["analysis_basis"], "subtitle_or_audio_or_document_text")
+        self.assertIn("仅基于字幕、音频转写或文档文本", summary)
 
     def test_llm_prompt_declares_audio_only_basis(self) -> None:
         prompt = self.module.build_llm_prompt(
@@ -289,6 +329,19 @@ class VideoSummaryTests(unittest.TestCase):
         self.assertIn("no OCR, screenshots, or visual scene understanding", prompt)
         self.assertIn("no OCR, screenshots, or visual scene understanding", chunk_prompt)
         self.assertIn("分析范围：仅基于字幕/音频转写", prompt)
+        document_prompt = self.module.build_llm_prompt(
+            title="扫描文档",
+            source="D:/Documents/scanned.pdf",
+            author="作者",
+            duration="未知",
+            transcript="OCR 文档正文",
+            subtitle_lang=None,
+            draft_summary="草稿",
+            content_type="video",
+        )
+        self.assertIn("document text from a text-layer PDF or OOXML document", document_prompt)
+        self.assertIn("no audio transcription, OCR", document_prompt)
+        self.assertNotIn("including optional PDF OCR", document_prompt)
 
     def test_call_llm_retries_429_then_succeeds(self) -> None:
         response = FakeResponse({"choices": [{"message": {"content": "成功"}}]})
@@ -378,40 +431,203 @@ class VideoSummaryTests(unittest.TestCase):
             out_dir = Path(temp_dir)
             transcript = "[00:12] 复用逐字稿第一段内容足够长。\n[01:05] 复用逐字稿第二段内容足够长。"
             self.module.refresh_existing_segment_artifacts(out_dir, transcript)
-            segments = json.loads((out_dir / "transcript_segments.json").read_text(encoding="utf-8"))
-            timed = (out_dir / "transcript_timed.txt").read_text(encoding="utf-8")
+            segments = json.loads((out_dir / "_internal" / "transcript_segments.json").read_text(encoding="utf-8"))
+            timed = (out_dir / "_internal" / "transcript_timed.txt").read_text(encoding="utf-8")
         self.assertEqual(segments[0]["start"], 12.0)
         self.assertIn("[01:05]", timed)
 
-    def test_reuse_transcript_edit_invalidates_stale_transcript_and_chunk_caches(self) -> None:
+    def test_offline_outputs_are_internal_drafts_until_llm_refinement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             out_dir = Path(temp_dir)
-            old_transcript = "[00:12] 旧逐字稿第一段内容足够长。\n[01:05] 旧逐字稿第二段内容足够长。"
-            new_transcript = "编辑后的逐字稿已经替换旧内容，章节缓存和时间戳缓存都不能继续复用。"
-            self.module.write_transcript_artifacts(
+            self.module.write_outputs(
+                {"title": "测试视频", "uploader": "作者", "duration": 90},
+                "https://example.test/video",
                 out_dir,
-                old_transcript,
-                [
-                    {"start": 12, "end": 20, "text": "旧逐字稿第一段内容足够长。"},
-                    {"start": 65, "end": 75, "text": "旧逐字稿第二段内容足够长。"},
-                ],
+                "逐字稿内容足够长，用于生成中间摘要和脑图草稿。",
+                "zh",
+                "compact",
             )
-            (out_dir / "metadata.json").write_text(
-                json.dumps({"transcript_sha256": hashlib.sha256(old_transcript.encode("utf-8")).hexdigest()}),
-                encoding="utf-8",
-            )
-            (out_dir / "summary_chunks.json").write_text(
-                json.dumps([{"index": 1, "summary": "旧章节缓存"}], ensure_ascii=False),
+            self.assertTrue((out_dir / "_internal" / "summary_draft.md").exists())
+            self.assertTrue((out_dir / "_internal" / "mindmap_draft.mmd").exists())
+            self.assertFalse((out_dir / "summary.md").exists())
+            self.assertFalse((out_dir / "mindmap.mmd").exists())
+            self.assertFalse((out_dir / "_internal" / "previous_final").exists())
+
+    def test_new_output_clears_previous_summary_chunk_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            internal = out_dir / "_internal"
+            internal.mkdir(parents=True)
+            stale_cache = internal / "summary_chunks.json"
+            stale_cache.write_text(
+                '[{"index": 1, "summary": "旧逐字稿的摘要"}]',
                 encoding="utf-8",
             )
 
-            self.module.refresh_existing_segment_artifacts(out_dir, new_transcript)
-            chapters = self.module.chapterize_from_files(out_dir, new_transcript, 2)
+            self.module.prepare_output_directory(out_dir)
+            self.module.write_outputs(
+                {"title": "测试视频", "uploader": "作者", "duration": 90},
+                "https://example.test/video",
+                out_dir,
+                "新逐字稿内容足够长，用于验证每轮新输出不复用旧分块缓存。",
+                "zh",
+                "compact",
+            )
 
-            self.assertFalse((out_dir / "transcript_segments.json").exists())
-            self.assertFalse((out_dir / "transcript_timed.txt").exists())
-            self.assertFalse((out_dir / "summary_chunks.json").exists())
-            self.assertNotIn("旧逐字稿", json.dumps(chapters, ensure_ascii=False))
+            self.assertFalse(stale_cache.exists())
+
+    def test_llm_refinement_failure_archives_existing_final_files_outside_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            summary = out_dir / "summary.md"
+            mindmap = out_dir / "mindmap.mmd"
+            summary.write_text("既有最终摘要\n", encoding="utf-8")
+            mindmap.write_text("mindmap\n  root((既有最终脑图))\n", encoding="utf-8")
+
+            self.module.prepare_output_directory(out_dir)
+            self.module.write_outputs(
+                {"title": "测试视频", "uploader": "作者", "duration": 90},
+                "https://example.test/video",
+                out_dir,
+                "逐字稿内容足够长，用于生成本次运行的内部草稿。",
+                "zh",
+                "compact",
+            )
+            archive = out_dir / "_internal" / "previous_final"
+            self.assertFalse(summary.exists())
+            self.assertFalse(mindmap.exists())
+
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
+                self.module.llm_module, "call_llm", side_effect=RuntimeError("LLM 请求失败")
+            ):
+                with self.assertRaises(Exception):
+                    self.module.refine_with_llm(
+                        {"title": "测试视频", "uploader": "作者", "duration": 90},
+                        "https://example.test/video",
+                        out_dir,
+                        "逐字稿",
+                        "zh",
+                        "gpt-test",
+                        "responses",
+                        12000,
+                        "video",
+                    )
+
+            self.assertFalse(summary.exists())
+            self.assertFalse(mindmap.exists())
+            self.assertEqual((archive / "summary.md").read_text(encoding="utf-8"), "既有最终摘要\n")
+            self.assertEqual((archive / "mindmap.mmd").read_text(encoding="utf-8"), "mindmap\n  root((既有最终脑图))\n")
+
+    def test_llm_refinement_publishes_only_the_final_summary_and_mindmap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            internal = out_dir / "_internal"
+            internal.mkdir(parents=True)
+            (internal / "summary_draft.md").write_text("离线摘要草稿", encoding="utf-8")
+            (internal / "mindmap_draft.mmd").write_text("mindmap\n  root((草稿))\n", encoding="utf-8")
+            refined = "# 精校摘要\n\n这里是一行最小实质摘要正文。\n\n```mermaid\nmindmap\n  root((主题))\n```"
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
+                self.module.llm_module, "call_llm", return_value=refined
+            ):
+                self.module.refine_with_llm(
+                    {"title": "测试视频", "uploader": "作者", "duration": 90},
+                    "https://example.test/video",
+                    out_dir,
+                    "逐字稿",
+                    "zh",
+                    "gpt-test",
+                    "responses",
+                    12000,
+                    "video",
+                )
+
+            root_files = {path.name for path in out_dir.iterdir() if path.is_file()}
+            self.assertEqual(root_files, {"summary.md", "mindmap.mmd"})
+            self.assertIn("精校摘要", (out_dir / "summary.md").read_text(encoding="utf-8"))
+            self.assertIn("mindmap", (out_dir / "mindmap.mmd").read_text(encoding="utf-8"))
+
+
+    def test_refined_draft_excludes_transcript_section(self) -> None:
+        from video_summary.outputs import build_refined_summary
+
+        transcript = "这是不应拼入精校草稿的完整逐字稿内容。"
+        lines = build_refined_summary(
+            "测试主题",
+            "课程.pdf",
+            "作者",
+            90,
+            None,
+            transcript,
+            ["核心结论"],
+            ["核心概念"],
+            [{"title": "第一章", "summary": "章节摘要", "time": 0}],
+        )
+
+        draft = "\n".join(lines)
+        self.assertIn("## 思维导图", draft)
+        self.assertNotIn("## 口播逐字稿", draft)
+        self.assertNotIn(transcript, draft)
+
+    def test_new_transcript_artifacts_are_written_under_support(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            transcript = "新输出逐字稿内容足够长，用于验证 support 目录契约。"
+
+            self.module.write_transcript_artifacts(out_dir, transcript, None)
+
+            self.assertEqual((out_dir / "support" / "transcript.txt").read_text(encoding="utf-8"), transcript)
+            self.assertFalse((out_dir / "transcript.txt").exists())
+
+    def test_safe_display_name_hides_local_parent_path_in_metadata_and_draft(self) -> None:
+        from video_summary.sources import safe_display_name
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "private" / "课程内部.pdf"
+            source.parent.mkdir()
+            source.write_bytes(b"source")
+            out_dir = Path(temp_dir) / "output"
+            transcript = "这是足够长的文档文本，用于验证用户可见来源名称不会泄露本地父路径。"
+
+            self.module.write_outputs(
+                {"title": source.stem, "uploader": "本地文件", "duration": None},
+                str(source),
+                out_dir,
+                transcript,
+                None,
+                "compact",
+            )
+
+            metadata = json.loads((out_dir / "_internal" / "metadata.json").read_text(encoding="utf-8"))
+            draft = (out_dir / "_internal" / "summary_draft.md").read_text(encoding="utf-8")
+            self.assertEqual(metadata["source"], safe_display_name(str(source)))
+            self.assertNotIn(str(source.parent), metadata["source"])
+            self.assertNotIn(str(source.parent), draft)
+
+    def test_final_transcript_sections_are_removed_for_every_input_type(self) -> None:
+        from video_summary import llm
+
+        generated = (
+            "# 精校摘要\n\n"
+            "## 核心结论\n正文。\n\n"
+            "## 口播逐字稿\n完整逐字稿内容。\n\n"
+            "### 逐字稿片段\n更多原文。\n\n"
+            "## 结论\n保留。"
+        )
+        sources = (
+            "https://example.test/video",
+            r"C:\Videos\lesson.mp4",
+            r"C:\Documents\lesson.pdf",
+            r"C:\Documents\lesson.docx",
+        )
+
+        for source in sources:
+            with self.subTest(source=source):
+                cleaned = llm._prepare_final_summary(generated, source)
+                self.assertIn("核心结论", cleaned)
+                self.assertIn("结论", cleaned)
+                self.assertNotIn("口播逐字稿", cleaned)
+                self.assertNotIn("逐字稿片段", cleaned)
+                self.assertNotIn("完整逐字稿内容", cleaned)
 
 
 class FakeResponse:

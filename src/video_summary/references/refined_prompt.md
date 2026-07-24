@@ -59,11 +59,12 @@ mindmap
     术语
 ```
 
----
-
-## 口播逐字稿
-保留原文或整理后的逐字稿。
 ```
+
+交付约束：
+- transcript 仅作分析依据，不是最终稿内容。
+- 最终稿不得包含完整逐字稿、全文转录或“整理后逐字稿”章节。
+- 只允许为说明关键观点引用 1-3 句原话，其余内容必须改写为精修总结。
 
 Rules:
 - Keep the author's original stance separate from your own judgment.
