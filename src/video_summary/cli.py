@@ -14,6 +14,7 @@ from .config import (
     SUPPORTED_LANGUAGES,
     UserFacingError,
     apply_codex_config,
+    default_output_root,
     default_transcribe_language,
     load_domain_config,
     load_local_env,
@@ -21,20 +22,14 @@ from .config import (
 from .documents import extract_document_text
 from .llm import call_llm, refine_with_llm
 from .outputs import (
-    ARCHIVED_OUTPUTS,
     final_delivery_ready,
     output_contract_lines,
     prepare_output_directory,
     write_outputs,
 )
 from .storage import (
-    MINDMAP_DRAFT_FILENAME,
     MINDMAP_FILENAME,
-    SUMMARY_DRAFT_FILENAME,
     SUMMARY_FILENAME,
-    TRANSCRIPT_RELATIVE_PATH,
-    legacy_transcript_path,
-    transcript_path,
 )
 from .sources import (
     download_audio,
@@ -55,6 +50,7 @@ from .subtitles import (
 )
 from .summarization import resolve_content_type
 from .transcription import transcribe_audio
+from .runtime import RunWorkspace
 from .transcript import apply_domain_replacements_to_segments, normalize_asr_text
 
 
@@ -98,35 +94,55 @@ def _require_final_delivery(out_dir: Path) -> None:
         )
 
 
-def _previous_final_note(out_dir: Path) -> str | None:
-    archive_dir = out_dir / "_internal" / "previous_final"
-    if any((archive_dir / filename).is_file() for filename in ARCHIVED_OUTPUTS):
-        return "旧最终稿已归档至 _internal/previous_final/，不属于本次结果。"
+def _env_file_from_argv(argv: list[str] | None = None) -> str | None:
+    values = sys.argv[1:] if argv is None else argv
+    for index, value in enumerate(values):
+        if value == "--env-file" and index + 1 < len(values):
+            return values[index + 1]
+        if value.startswith("--env-file="):
+            return value.split("=", 1)[1]
     return None
 
 
+def _required_local_transcript_path(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError(
+            "--reuse-transcript 必须显式提供本地转写文件路径。"
+        )
+    return value
+
+
+def _remove_empty_output(out_dir: Path) -> None:
+    """Remove only an empty source directory; preserve any user content."""
+    if not out_dir.is_dir():
+        return
+    try:
+        out_dir.rmdir()
+    except OSError:
+        return
+
+
 def _final_failure_reason(out_dir: Path, reason: str) -> str:
-    if "最终稿已发布但后续归档清理失败" in reason:
-        return reason
-    note = _previous_final_note(out_dir)
-    suffix = (
-        "最终稿：未生成\n"
-        f"{TRANSCRIPT_RELATIVE_PATH}：依据材料，不是最终稿\n"
-        "_internal/summary_draft.md：内部草稿，不是最终稿\n"
-        "_internal/mindmap_draft.mmd：内部草稿，不是最终稿\n"
-        "_internal/*：内部状态（草稿/缓存/元数据），全部不是最终稿"
-    )
-    if note:
-        suffix += f"\n{note}"
+    if (out_dir / SUMMARY_FILENAME).is_file():
+        suffix = f"当前输出目录仅保留已有最终稿：{SUMMARY_FILENAME}"
+    else:
+        suffix = "最终稿：未生成；本次运行的临时转写和内部草稿已清理"
     return f"{reason}；{suffix}"
+
+
 def main() -> None:
-    load_local_env()
+    try:
+        load_local_env(_env_file_from_argv())
+    except UserFacingError as error:
+        _report_failure("配置", error.message, error.code)
+
     parser = CliArgumentParser(
         description=(
             "支持 Bilibili/YouTube URL、本地音频/视频、PDF 和 OOXML Word 文档。\n"
             "默认不产生最终稿。\n"
             "只有 --llm-refine 成功后才发布 summary.md。\n"
-            "support/transcript.txt 和 _internal/ 不是最终交付。\n"
+            "本次运行的转写、草稿和内部状态只写入临时工作区，运行结束自动清理。\n"
+            "实际输出目录为 PATH/<source-id>/，其中只有根目录 summary.md（及可选 mindmap.mmd）是最终交付。\n"
             "仅支持有文本层的 PDF；图像型 PDF 不支持。\n"
             "refined 是内部草稿模板，不是最终稿。"
         ),
@@ -138,9 +154,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--out-root",
-        default="output",
-        help="输出根目录；实际写入 PATH/<source-id>/",
+        default=str(default_output_root()),
+        help="输出根目录；默认写入项目根目录 output/<source-id>/；实际写入 PATH/<source-id>/，显式传入相对路径时相对当前 cwd",
     )
+    parser.add_argument("--env-file", help="显式指定 .local.env 文件；未指定时按项目根目录、工作区根目录顺序稳定发现")
     parser.add_argument("--cookies-from-browser", help="需要登录态时读取浏览器 Cookie，例如 chrome、edge、firefox")
     parser.add_argument("--force-transcribe", action="store_true", help="忽略字幕，强制下载音频并转写")
     parser.add_argument(
@@ -152,8 +169,9 @@ def main() -> None:
     parser.add_argument("--domain", choices=SUPPORTED_DOMAINS, default=os.environ.get("SUMMARY_DOMAIN", "general"), help="领域词表：general 通用，zh-social 中文情感/社交课程")
     parser.add_argument(
         "--reuse-transcript",
-        action="store_true",
-        help=f"仅复用已有 {TRANSCRIPT_RELATIVE_PATH}（兼容旧版根层 transcript.txt）重新生成摘要和脑图；两处均缺失时直接失败；不能与 --force-transcribe 同时使用",
+        type=_required_local_transcript_path,
+        metavar="PATH",
+        help="复用用户显式提供的本地转写 PATH；不能与 --force-transcribe 同时使用",
     )
     parser.add_argument(
         "--template",
@@ -171,10 +189,21 @@ def main() -> None:
     parser.add_argument("--llm-api", choices=("responses", "chat"), default=os.environ.get("OPENAI_API_KIND", "responses"), help="LLM API 类型：responses 或 chat")
     parser.add_argument("--llm-max-chars", type=int, default=60000, help="发送给 LLM 的逐字稿最大字符数")
     parser.add_argument("--use-codex-config", action="store_true", help="读取 ~/.codex/config.toml 的模型、wire_api 和 base_url 作为 LLM 精校配置")
-    args = parser.parse_args()
-    if args.force_transcribe and args.reuse_transcript:
+    raw_argv = sys.argv[1:]
+    if "--force-transcribe" in raw_argv and any(
+        value == "--reuse-transcript" or value.startswith("--reuse-transcript=")
+        for value in raw_argv
+    ):
         parser.error("--force-transcribe 与 --reuse-transcript 不能同时使用")
+    for index, value in enumerate(raw_argv):
+        if value == "--reuse-transcript" and (
+            index + 1 >= len(raw_argv) or raw_argv[index + 1].startswith("-")
+        ):
+            parser.error("--reuse-transcript 必须显式提供本地转写文件路径。")
+    args = parser.parse_args()
 
+    out_dir: Path | None = None
+    run_workspace: RunWorkspace | None = None
     try:
         args.llm_model_explicit = "--llm-model" in sys.argv
         args.llm_api_explicit = "--llm-api" in sys.argv
@@ -183,20 +212,19 @@ def main() -> None:
         _run_stage("配置", lambda: load_domain_config(args.domain))
 
         source = args.source
-        if args.reuse_transcript and is_url_source(source):
+        if args.reuse_transcript is not None and is_url_source(source):
             raise StageFailure("输出准备", "--reuse-transcript 仅支持本地文件。")
-        if args.reuse_transcript:
+        if args.reuse_transcript is not None:
+            run_workspace = RunWorkspace.create(Path(args.out_root))
+            workspace_dir = run_workspace.path
             video_id = _run_stage("输出准备", lambda: source_id_without_access(source))
             out_dir = Path(args.out_root) / video_id
-            _run_stage("输出准备", lambda: prepare_output_directory(out_dir, True))
-            current_transcript = transcript_path(out_dir)
-            legacy_transcript = legacy_transcript_path(out_dir)
-            if not current_transcript.is_file() and not legacy_transcript.is_file():
+            transcript_path_to_read = Path(args.reuse_transcript).expanduser()
+            if not transcript_path_to_read.is_file():
                 raise StageFailure(
                     "输出准备",
-                    f"--reuse-transcript 缺少 {TRANSCRIPT_RELATIVE_PATH}，且未找到旧版根层 transcript.txt。",
+                    f"--reuse-transcript 指定的本地转写文件不存在或不可读：{transcript_path_to_read}",
                 )
-            transcript_path_to_read = current_transcript if current_transcript.is_file() else legacy_transcript
             transcript = _run_stage(
                 "输出生成",
                 lambda: transcript_path_to_read.read_text(encoding="utf-8", errors="ignore"),
@@ -207,9 +235,13 @@ def main() -> None:
             info = _run_stage("元数据", lambda: extract_info(source, args.cookies_from_browser))
             video_id = _run_stage("元数据", lambda: slug_from_info(info, source))
             out_dir = Path(args.out_root) / video_id
-            _run_stage("输出准备", lambda: prepare_output_directory(out_dir, False))
             transcript = ""
             local_path = _run_stage("元数据", lambda: local_source_path(source))
+
+        if run_workspace is None:
+            run_workspace = RunWorkspace.create(Path(args.out_root))
+            workspace_dir = run_workspace.path
+        _run_stage("输出准备", lambda: prepare_output_directory(out_dir, False, False))
 
         subtitle_lang: str | None = None
         subtitle_segments: list[dict[str, Any]] = []
@@ -225,7 +257,7 @@ def main() -> None:
             _run_stage(
                 "输出生成",
                 lambda: write_transcript_artifacts(
-                    out_dir,
+                    workspace_dir,
                     transcript,
                     None,
                     {"engine": "document", "requested_language": args.language, "domain": args.domain},
@@ -238,7 +270,7 @@ def main() -> None:
                 subtitle_lang, entry = subtitle
                 subtitle_path = _run_stage(
                     "在线字幕与音频获取",
-                    lambda: fetch_subtitle(entry, out_dir, safe_filename(subtitle_lang)),
+                    lambda: fetch_subtitle(entry, workspace_dir, safe_filename(subtitle_lang)),
                 )
                 subtitle_segments = _run_stage(
                     "在线字幕与音频获取",
@@ -252,11 +284,11 @@ def main() -> None:
         if not transcript:
             audio = _run_stage(
                 "在线字幕与音频获取",
-                lambda: download_audio(source, out_dir, args.cookies_from_browser),
+                lambda: download_audio(source, workspace_dir, args.cookies_from_browser),
             )
             transcript = _run_stage(
                 "本地转写",
-                lambda: transcribe_audio(audio, out_dir, args.local_whisper_model, args.language),
+                lambda: transcribe_audio(audio, workspace_dir, args.local_whisper_model, args.language),
             )
             transcript_artifacts_written = True
 
@@ -275,7 +307,7 @@ def main() -> None:
             _run_stage(
                 "输出生成",
                 lambda: write_transcript_artifacts(
-                    out_dir,
+                    workspace_dir,
                     transcript,
                     subtitle_segments,
                     {
@@ -288,25 +320,21 @@ def main() -> None:
             )
             transcript_artifacts_written = True
         elif not transcript_artifacts_written:
-            _run_stage("输出生成", lambda: refresh_existing_segment_artifacts(out_dir, transcript))
+            _run_stage("输出生成", lambda: refresh_existing_segment_artifacts(workspace_dir, transcript))
         content_type = _run_stage("输出生成", lambda: resolve_content_type(args.content_type, info, source))
         _run_stage(
             "输出生成",
-            lambda: write_outputs(info, source, out_dir, transcript, subtitle_lang, args.template),
+            lambda: write_outputs(info, source, workspace_dir, transcript, subtitle_lang, args.template),
         )
         if not args.llm_refine:
             print(f"输出目录：{out_dir}")
             print("最终稿：未生成")
-            print("未生成最终稿：本次运行仅生成草稿。")
-            print(f"{TRANSCRIPT_RELATIVE_PATH}：依据材料，不是最终稿")
-            print("_internal/summary_draft.md：内部草稿，不是最终稿")
-            print("_internal/mindmap_draft.mmd：内部草稿，不是最终稿")
-            print("_internal/*：内部状态（草稿/缓存/元数据），全部不是最终稿")
-            if note := _previous_final_note(out_dir):
-                print(note)
+            print("未生成最终稿：本次运行仅生成内部草稿，已随运行结束清理。")
+            print("临时转写、分段数据和内部草稿：已清理")
             print("如需发布最终稿，请使用 --llm-refine。")
             for line in output_contract_lines(out_dir):
                 print(line)
+            _remove_empty_output(out_dir)
             return
         cleanup_warning = _run_stage(
             "LLM精校",
@@ -320,6 +348,7 @@ def main() -> None:
                 args.llm_api,
                 args.llm_max_chars,
                 content_type,
+                workspace_dir=workspace_dir,
             ),
         )
         _run_stage("最终稿发布", lambda: _require_final_delivery(out_dir))
@@ -334,11 +363,20 @@ def main() -> None:
         for line in output_contract_lines(out_dir):
             print(line)
     except StageFailure as error:
+        if out_dir is not None:
+            _remove_empty_output(out_dir)
         reason = error.reason
-        if "out_dir" in locals() and error.stage != "输出准备":
+        if out_dir is not None and error.stage != "输出准备":
             reason = _final_failure_reason(out_dir, reason)
         _report_failure(error.stage, reason, error.code)
     except UserFacingError as error:
+        if out_dir is not None:
+            _remove_empty_output(out_dir)
         _report_failure("未处理", error.message, error.code)
     except Exception as error:
+        if out_dir is not None:
+            _remove_empty_output(out_dir)
         _report_failure("未处理", _exception_reason(error))
+    finally:
+        if run_workspace is not None:
+            run_workspace.cleanup()

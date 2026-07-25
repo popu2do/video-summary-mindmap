@@ -38,6 +38,7 @@ def load_module() -> types.SimpleNamespace:
         keywords=summarization.keywords,
         transcribe_audio_local=transcription.transcribe_audio_local,
         default_transcribe_language=config.default_transcribe_language,
+        UserFacingError=config.UserFacingError,
         write_outputs=outputs.write_outputs,
         prepare_output_directory=outputs.prepare_output_directory,
         build_llm_prompt=llm.build_llm_prompt,
@@ -175,18 +176,40 @@ class VideoSummaryTests(unittest.TestCase):
         self.assertEqual(segments[0]["start"], 123.456)
         self.assertEqual(segments[0]["end"], 124.956)
 
-    def test_timed_transcript_and_chapter_time(self) -> None:
+    def test_transcript_segments_and_chapter_time(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             out_dir = Path(temp_dir)
             segments = [
                 {"start": 10, "end": 20, "text": "这是第一段足够长的字幕内容，用于生成章节摘要。"},
                 {"start": 70, "end": 80, "text": "这是第二段足够长的字幕内容，用于生成章节摘要。"},
             ]
-            self.module.write_transcript_artifacts(out_dir, "文本", segments)
-            timed = (out_dir / "_internal" / "transcript_timed.txt").read_text(encoding="utf-8")
+            self.module.write_transcript_artifacts(out_dir, "文本", segments, {"engine": "test"})
+            internal_dir = out_dir / "_internal"
+            self.assertEqual(
+                {path.name for path in internal_dir.iterdir() if path.is_file()},
+                {"transcript_segments.json"},
+            )
+            self.assertFalse((internal_dir / "transcript_timed.txt").exists())
+            self.assertFalse((internal_dir / "transcription.json").exists())
             chapters = self.module.chapterize_from_files(out_dir, "文本", 2)
-        self.assertIn("[00:10]", timed)
+            self.module.write_outputs(
+                {"title": "测试视频", "uploader": "作者", "duration": 90},
+                "https://example.test/video",
+                out_dir,
+                "文本",
+                "zh",
+                "compact",
+            )
+            segment_data = json.loads(
+                (internal_dir / "transcript_segments.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue((internal_dir / "summary_draft.md").is_file())
+            self.assertEqual(
+                {path.name for path in internal_dir.iterdir() if path.is_file()},
+                {"transcript_segments.json", "summary_draft.md"},
+            )
         self.assertEqual(chapters[0]["time"], 10)
+        self.assertEqual(segment_data[0]["start"], 10)
 
     def test_local_source_ids_distinguish_same_name_and_extension_in_different_directories(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-source-id-unit-") as temp_dir:
@@ -300,9 +323,7 @@ class VideoSummaryTests(unittest.TestCase):
                 "zh",
                 "compact",
             )
-            metadata = json.loads((out_dir / "_internal" / "metadata.json").read_text(encoding="utf-8"))
             summary = (out_dir / "_internal" / "summary_draft.md").read_text(encoding="utf-8")
-        self.assertEqual(metadata["analysis_basis"], "subtitle_or_audio_or_document_text")
         self.assertIn("仅基于字幕、音频转写或文档文本", summary)
 
     def test_llm_prompt_declares_audio_only_basis(self) -> None:
@@ -369,7 +390,7 @@ class VideoSummaryTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=True), \
                 mock.patch.object(self.module.urllib.request, "urlopen", side_effect=self.http_error(401, "unauthorized")) as urlopen, \
                 mock.patch.object(self.module.time, "sleep") as sleep:
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(self.module.UserFacingError):
                 self.module.call_llm("prompt", "model", "chat")
         self.assertEqual(urlopen.call_count, 1)
         sleep.assert_not_called()
@@ -379,7 +400,7 @@ class VideoSummaryTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=True), \
                 mock.patch.object(self.module.urllib.request, "urlopen", side_effect=errors) as urlopen, \
                 mock.patch.object(self.module.time, "sleep") as sleep:
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(self.module.UserFacingError):
                 self.module.call_llm("prompt", "model", "chat")
         self.assertEqual(urlopen.call_count, 3)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
@@ -426,15 +447,14 @@ class VideoSummaryTests(unittest.TestCase):
         self.assertNotIn('"', mermaid)
         self.assertNotIn("[三]", mermaid)
 
-    def test_reuse_transcript_refreshes_timed_artifacts(self) -> None:
+    def test_reuse_transcript_refreshes_segment_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             out_dir = Path(temp_dir)
             transcript = "[00:12] 复用逐字稿第一段内容足够长。\n[01:05] 复用逐字稿第二段内容足够长。"
             self.module.refresh_existing_segment_artifacts(out_dir, transcript)
             segments = json.loads((out_dir / "_internal" / "transcript_segments.json").read_text(encoding="utf-8"))
-            timed = (out_dir / "_internal" / "transcript_timed.txt").read_text(encoding="utf-8")
         self.assertEqual(segments[0]["start"], 12.0)
-        self.assertIn("[01:05]", timed)
+        self.assertEqual(segments[1]["start"], 65.0)
 
     def test_offline_outputs_are_internal_drafts_until_llm_refinement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -448,7 +468,6 @@ class VideoSummaryTests(unittest.TestCase):
                 "compact",
             )
             self.assertTrue((out_dir / "_internal" / "summary_draft.md").exists())
-            self.assertTrue((out_dir / "_internal" / "mindmap_draft.mmd").exists())
             self.assertFalse((out_dir / "summary.md").exists())
             self.assertFalse((out_dir / "mindmap.mmd").exists())
             self.assertFalse((out_dir / "_internal" / "previous_final").exists())
@@ -476,27 +495,24 @@ class VideoSummaryTests(unittest.TestCase):
 
             self.assertFalse(stale_cache.exists())
 
-    def test_llm_refinement_failure_archives_existing_final_files_outside_root(self) -> None:
+    def test_llm_refinement_failure_hides_existing_final_files_without_archive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            out_dir = Path(temp_dir)
+            root = Path(temp_dir)
+            out_dir = root / "output"
+            run_dir = root / "run"
+            out_dir.mkdir()
             summary = out_dir / "summary.md"
             mindmap = out_dir / "mindmap.mmd"
             summary.write_text("既有最终摘要\n", encoding="utf-8")
             mindmap.write_text("mindmap\n  root((既有最终脑图))\n", encoding="utf-8")
-
-            self.module.prepare_output_directory(out_dir)
             self.module.write_outputs(
                 {"title": "测试视频", "uploader": "作者", "duration": 90},
                 "https://example.test/video",
-                out_dir,
+                run_dir,
                 "逐字稿内容足够长，用于生成本次运行的内部草稿。",
                 "zh",
                 "compact",
             )
-            archive = out_dir / "_internal" / "previous_final"
-            self.assertFalse(summary.exists())
-            self.assertFalse(mindmap.exists())
-
             with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
                 self.module.llm_module, "call_llm", side_effect=RuntimeError("LLM 请求失败")
             ):
@@ -511,12 +527,11 @@ class VideoSummaryTests(unittest.TestCase):
                         "responses",
                         12000,
                         "video",
+                        workspace_dir=run_dir,
                     )
-
             self.assertFalse(summary.exists())
             self.assertFalse(mindmap.exists())
-            self.assertEqual((archive / "summary.md").read_text(encoding="utf-8"), "既有最终摘要\n")
-            self.assertEqual((archive / "mindmap.mmd").read_text(encoding="utf-8"), "mindmap\n  root((既有最终脑图))\n")
+            self.assertFalse((out_dir / "_internal" / "previous_final").exists())
 
     def test_llm_refinement_publishes_only_the_final_summary_and_mindmap(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -524,7 +539,6 @@ class VideoSummaryTests(unittest.TestCase):
             internal = out_dir / "_internal"
             internal.mkdir(parents=True)
             (internal / "summary_draft.md").write_text("离线摘要草稿", encoding="utf-8")
-            (internal / "mindmap_draft.mmd").write_text("mindmap\n  root((草稿))\n", encoding="utf-8")
             refined = "# 精校摘要\n\n这里是一行最小实质摘要正文。\n\n```mermaid\nmindmap\n  root((主题))\n```"
             with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
                 self.module.llm_module, "call_llm", return_value=refined
@@ -597,10 +611,8 @@ class VideoSummaryTests(unittest.TestCase):
                 "compact",
             )
 
-            metadata = json.loads((out_dir / "_internal" / "metadata.json").read_text(encoding="utf-8"))
             draft = (out_dir / "_internal" / "summary_draft.md").read_text(encoding="utf-8")
-            self.assertEqual(metadata["source"], safe_display_name(str(source)))
-            self.assertNotIn(str(source.parent), metadata["source"])
+            self.assertIn(safe_display_name(str(source)), draft)
             self.assertNotIn(str(source.parent), draft)
 
     def test_final_transcript_sections_are_removed_for_every_input_type(self) -> None:

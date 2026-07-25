@@ -4,12 +4,18 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from typing import Iterable, Mapping
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CANONICAL_CLI = REPO_ROOT / "src" / "video_summary_cli.py"
 FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures"
+
+
+def temporary_test_directory(prefix: str = "video-summary-test-"):
+    """Create a self-contained temporary directory inside the repository."""
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=REPO_ROOT)
 
 
 def run_canonical_cli(
@@ -19,7 +25,10 @@ def run_canonical_cli(
     timeout: float = 10.0,
 ) -> subprocess.CompletedProcess[str]:
     """Run the migration target as a black-box CLI from an isolated cwd."""
-    command: Iterable[str] = (sys.executable, str(CANONICAL_CLI), *args)
+    effective_args = list(args)
+    if "--out-root" not in effective_args:
+        effective_args.extend(("--out-root", str(cwd / "output")))
+    command: Iterable[str] = (sys.executable, str(CANONICAL_CLI), *effective_args)
     child_env = os.environ.copy()
     if env:
         child_env.update(env)

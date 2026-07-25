@@ -22,7 +22,7 @@ from video_summary.outputs import final_delivery_ready
 from video_summary.sources import local_source_id
 from unittest import mock
 
-from tests.support.cli import FIXTURES_DIR, assert_cli_succeeded, run_canonical_cli
+from tests.support.cli import FIXTURES_DIR, assert_cli_succeeded, run_canonical_cli, temporary_test_directory
 
 
 SOURCE_FIXTURE = FIXTURES_DIR / "offline_document.docx"
@@ -175,46 +175,35 @@ class CanonicalCliContractTests(unittest.TestCase):
                     self.assertNotIn(str(source.parent), error)
                     self.assertNotRegex(normalized_error, r"(?i)(?:[a-z]:/|/users/)")
 
-    def test_late_stage_failure_archives_stale_final_immediately_after_out_dir_resolution(self) -> None:
+    def test_late_stage_failure_preserves_existing_delivery_and_does_not_archive_it(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-late-stage-stale-final-") as temp_dir:
             workspace = Path(temp_dir)
             output_dir = workspace / "output" / SOURCE_ID
             output_dir.mkdir(parents=True)
             (output_dir / "summary.md").write_text("旧摘要\n", encoding="utf-8")
             (output_dir / "mindmap.mmd").write_text("旧脑图\n", encoding="utf-8")
+            (output_dir / "notes.txt").write_text("用户文件\n", encoding="utf-8")
             (output_dir / "summary_refined.md").write_text("旧兼容摘要\n", encoding="utf-8")
-            (output_dir / "mindmap_refined.mmd").write_text("旧兼容脑图\n", encoding="utf-8")
-
             previous_argv = sys.argv
-            sys.argv = [
-                str(REPO_ROOT / "src" / "video_summary_cli.py"),
-                str(SOURCE_FIXTURE),
-                "--out-root",
-                str(workspace / "output"),
-            ]
+            sys.argv = [str(REPO_ROOT / "src" / "video_summary_cli.py"), str(SOURCE_FIXTURE), "--out-root", str(workspace / "output")]
             stderr = io.StringIO()
             try:
-                with mock.patch.object(
-                    canonical_cli, "extract_document_text", side_effect=RuntimeError("文档提取失败")
-                ), contextlib.redirect_stderr(stderr):
+                with mock.patch.object(canonical_cli, "extract_document_text", side_effect=RuntimeError("文档提取失败")), contextlib.redirect_stderr(stderr):
                     with self.assertRaises(SystemExit) as raised:
                         canonical_cli.main()
             finally:
                 sys.argv = previous_argv
 
-            archive = output_dir / "_internal" / "previous_final"
             self.assertNotEqual(raised.exception.code, 0)
             self.assertIn("ERROR: 阶段=PDF/DOCX文本提取；", stderr.getvalue())
             self.assertIn("文档提取失败", stderr.getvalue())
-            self.assertIn("_internal/previous_final/", stderr.getvalue())
-            self.assertFalse((output_dir / "summary.md").exists())
-            self.assertFalse((output_dir / "mindmap.mmd").exists())
-            self.assertEqual((archive / "summary.md").read_text(encoding="utf-8"), "旧摘要\n")
-            self.assertEqual((archive / "mindmap.mmd").read_text(encoding="utf-8"), "旧脑图\n")
-            self.assertEqual((archive / "summary_refined.md").read_text(encoding="utf-8"), "旧兼容摘要\n")
-            self.assertEqual((archive / "mindmap_refined.mmd").read_text(encoding="utf-8"), "旧兼容脑图\n")
+            self.assertEqual((output_dir / "summary.md").read_text(encoding="utf-8"), "旧摘要\n")
+            self.assertEqual((output_dir / "mindmap.mmd").read_text(encoding="utf-8"), "旧脑图\n")
+            self.assertEqual((output_dir / "notes.txt").read_text(encoding="utf-8"), "用户文件\n")
+            self.assertFalse((output_dir / "summary_refined.md").exists())
+            self.assertFalse((output_dir / "_internal" / "previous_final").exists())
 
-    def test_local_transcription_artifacts_have_single_write_owner(self) -> None:
+    def test_local_transcription_artifacts_are_written_in_the_run_workspace(self) -> None:
         from video_summary.artifacts import write_transcript_artifacts
 
         with tempfile.TemporaryDirectory(prefix="video-summary-local-transcription-artifacts-") as temp_dir:
@@ -222,63 +211,48 @@ class CanonicalCliContractTests(unittest.TestCase):
             source = workspace / "sample.mp3"
             source.write_bytes(b"audio placeholder")
             output_root = workspace / "output"
-            info = {
-                "id": "sample",
-                "title": "本地音频测试",
-                "uploader": "本地文件",
-                "duration": None,
-                "subtitles": {},
-                "automatic_captions": {},
-                "_local_path": str(source),
-            }
-            transcript = "本地转写内容足够长，用于验证转写模块是 transcript artifact 的唯一写入者。"
-            segments = [{"start": 0.0, "end": 8.0, "text": "本地转写内容足够长"}]
+            transcript = "本地转写内容足够长，用于验证转写产物只属于本次运行工作区。"
+            artifact_dirs: list[Path] = []
 
-            def transcribe_and_write(
-                audio: Path, out_dir: Path, local_model: str, language: str
-            ) -> str:
-                write_transcript_artifacts(
-                    out_dir,
-                    transcript,
-                    segments,
-                    {
-                        "engine": "test-local",
-                        "model": local_model,
-                        "requested_language": language,
-                    },
-                )
+            def transcribe_and_write(audio: Path, run_dir: Path, local_model: str, language: str) -> str:
+                artifact_dirs.append(run_dir)
+                write_transcript_artifacts(run_dir, transcript, [{"start": 0.0, "end": 8.0, "text": transcript}], {"engine": "test-local"})
                 return transcript
 
             previous_argv = sys.argv
-            sys.argv = [
-                str(REPO_ROOT / "src" / "video_summary_cli.py"),
-                str(source),
-                "--out-root",
-                str(output_root),
-                "--template",
-                "compact",
-            ]
-            stdout = io.StringIO()
-            stderr = io.StringIO()
+            sys.argv = [str(REPO_ROOT / "src" / "video_summary_cli.py"), str(source), "--out-root", str(output_root), "--template", "compact"]
             try:
-                with mock.patch.object(canonical_cli, "extract_info", return_value=info), mock.patch.object(
-                    canonical_cli, "download_audio", return_value=source
-                ) as download_audio, mock.patch.object(
-                    canonical_cli, "transcribe_audio", side_effect=transcribe_and_write
-                ) as transcribe_audio, mock.patch.object(
-                    canonical_cli, "refresh_existing_segment_artifacts"
-                ) as refresh, contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                with mock.patch.object(canonical_cli, "load_local_env"), mock.patch.object(canonical_cli, "load_domain_config"), mock.patch.object(canonical_cli, "transcribe_audio", side_effect=transcribe_and_write), mock.patch.object(canonical_cli, "download_audio", return_value=source), mock.patch.object(canonical_cli, "choose_subtitle", return_value=None), contextlib.redirect_stdout(io.StringIO()):
                     canonical_cli.main()
             finally:
                 sys.argv = previous_argv
 
-            output_dir = output_root / local_source_id(source)
-            download_audio.assert_called_once()
-            transcribe_audio.assert_called_once()
-            refresh.assert_not_called()
-            self.assertTrue((output_dir / "support" / "transcript.txt").is_file())
-            self.assertTrue((output_dir / "_internal" / "transcript_segments.json").is_file())
-            self.assertTrue((output_dir / "_internal" / "transcription.json").is_file())
+            self.assertEqual(len(artifact_dirs), 1)
+            self.assertNotEqual(artifact_dirs[0].parent, output_root)
+            self.assertTrue(output_root.is_dir())
+            self.assertEqual(list(output_root.iterdir()), [])
+
+    def test_local_transcription_failure_leaves_no_retired_transcription_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-local-transcription-failure-") as temp_dir:
+            workspace = Path(temp_dir)
+            source = workspace / "sample.mp3"
+            source.write_bytes(b"audio placeholder")
+            output_root = workspace / "output"
+            previous_argv = sys.argv
+            sys.argv = [str(REPO_ROOT / "src" / "video_summary_cli.py"), str(source), "--out-root", str(output_root)]
+            stderr = io.StringIO()
+            try:
+                with mock.patch.object(canonical_cli, "download_audio", return_value=source), mock.patch.object(canonical_cli, "choose_subtitle", return_value=None), mock.patch.object(canonical_cli, "transcribe_audio", side_effect=RuntimeError("本地转写失败")), contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as raised:
+                        canonical_cli.main()
+            finally:
+                sys.argv = previous_argv
+
+            self.assertNotEqual(raised.exception.code, 0)
+            self.assertIn("ERROR: 阶段=本地转写；", stderr.getvalue())
+            self.assertIn("本地转写失败", stderr.getvalue())
+            self.assertTrue(output_root.is_dir())
+            self.assertEqual(list(output_root.iterdir()), [])
 
     def test_local_transcription_errors_are_stage_wrapped(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-local-transcription-error-") as temp_dir:
@@ -317,18 +291,14 @@ class CanonicalCliContractTests(unittest.TestCase):
         self.assertNotIn("Codex transcribe skill", result.stdout)
 
     def test_canonical_cli_help_states_draft_and_final_delivery_contract(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-delivery-help-") as temp_dir:
-            result = run_canonical_cli("--help", cwd=Path(temp_dir))
-
-        assert_cli_succeeded(self, result)
-        self.assertIn("默认不产生最终稿", result.stdout)
-        self.assertIn("只有 --llm-refine 成功后才发布 summary.md", result.stdout)
-        self.assertIn("support/transcript.txt", result.stdout)
-        self.assertIn("_internal/", result.stdout)
-        self.assertIn("不是最终交付", result.stdout)
-        self.assertIn("refined", result.stdout)
-        self.assertIn("内部草稿模板", result.stdout)
-        self.assertIn("不是最终稿", result.stdout)
+        result = run_canonical_cli("-h", cwd=Path(tempfile.mkdtemp(prefix="video-summary-help-")))
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        help_text = result.stdout
+        self.assertIn("只有 --llm-refine 成功后才发布 summary.md", help_text)
+        self.assertIn("只写入临时工作区", help_text)
+        self.assertIn("PATH/<source-id>/", help_text)
+        self.assertIn("summary.md", help_text)
+        self.assertIn("mindmap.mmd", help_text)
 
     def test_canonical_cli_does_not_expose_pdf_ocr_option(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-pdf-ocr-help-") as temp_dir:
@@ -450,31 +420,39 @@ class CanonicalCliContractTests(unittest.TestCase):
             "LLM",
             "可选 Mermaid 脑图",
             "语义精校",
-            "仅复用已有",
-            "两处均缺失时直接失败",
-            "transcript.txt",
+            "复用用户显式提供的本地转写 PATH",
             "不能与",
         ):
             self.assertIn(expected, result.stdout)
+        self.assertIn("--reuse-transcript PATH", result.stdout)
+        self.assertNotIn("未提供 PATH", result.stdout)
+        self.assertNotIn("support/transcript", result.stdout)
 
-    def test_source_id_detail_stays_in_docs_while_cli_help_stays_compact(self) -> None:
-        """Keep CLI help concise; README/SKILL carry the full local source-id contract."""
+    def test_source_id_is_path_derived_and_cli_help_names_the_output_shape(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-source-id-help-") as temp_dir:
-            result = run_canonical_cli("--help", cwd=Path(temp_dir))
-
-        assert_cli_succeeded(self, result)
+            workspace = Path(temp_dir)
+            left = workspace / "left" / "same-name.docx"
+            right = workspace / "right" / "same-name.docx"
+            left.parent.mkdir()
+            right.parent.mkdir()
+            left.write_bytes(b"left")
+            right.write_bytes(b"right")
+            self.assertNotEqual(local_source_id(left), local_source_id(right))
+            result = run_canonical_cli("-h", cwd=workspace)
+        self.assertEqual(result.returncode, 0)
         self.assertIn("PATH/<source-id>/", result.stdout)
-        for document in (REPO_ROOT / "README.md", REPO_ROOT / ".agents/skill/video-summary-mindmap/SKILL.md"):
-            text = document.read_text(encoding="utf-8")
-            self.assertIn("--reuse-transcript", text, msg=str(document))
-            self.assertIn("--force-transcribe", text, msg=str(document))
-            self.assertIn("不能同时使用", text, msg=str(document))
-            self.assertIn("ERROR: 阶段=", text, msg=str(document))
-            self.assertIn("--out-root", text, msg=str(document))
+        self.assertNotIn("previous_final", result.stdout)
 
-    def test_reuse_transcript_missing_both_locations_fails_without_fallback(self) -> None:
+    def test_reuse_transcript_requires_explicit_path_during_argument_validation(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-reuse-missing-legacy-") as temp_dir:
             workspace = Path(temp_dir)
+            output_dir = workspace / "output" / SOURCE_ID
+            (output_dir / "support").mkdir(parents=True)
+            support_transcript = output_dir / "support" / "transcript.txt"
+            root_transcript = output_dir / "transcript.txt"
+            support_transcript.write_text("持久化 support 转写，不得被隐式复用。", encoding="utf-8")
+            root_transcript.write_text("持久化根层转写，不得被隐式复用。", encoding="utf-8")
+
             result = run_canonical_cli(
                 str(SOURCE_FIXTURE),
                 "--reuse-transcript",
@@ -484,64 +462,45 @@ class CanonicalCliContractTests(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("--reuse-transcript", result.stderr)
-            self.assertIn("support/transcript.txt", result.stderr)
-            self.assertIn("旧版根层 transcript.txt", result.stderr)
-            self.assertFalse((workspace / "output" / SOURCE_ID / "support" / "transcript.txt").exists())
+            self.assertIn("ERROR: 阶段=参数校验；", result.stderr)
+            self.assertIn("--reuse-transcript 必须显式提供本地转写文件路径", result.stderr)
+            self.assertNotIn("阶段=输出准备", result.stderr)
+            self.assertNotIn("support/transcript", result.stderr)
+            self.assertEqual(support_transcript.read_text(encoding="utf-8"), "持久化 support 转写，不得被隐式复用。")
+            self.assertEqual(root_transcript.read_text(encoding="utf-8"), "持久化根层转写，不得被隐式复用。")
 
     def test_default_output_root_is_output(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-default-") as temp_dir:
             workspace = Path(temp_dir)
             result = run_canonical_cli(str(SOURCE_FIXTURE), cwd=workspace)
-
             assert_cli_succeeded(self, result)
-            self.assertTrue((workspace / "output" / SOURCE_ID).is_dir())
+            output_root = workspace / "output"
+            self.assertTrue(output_root.is_dir())
+            self.assertEqual(list(output_root.iterdir()), [])
+            self.assertIn(str(output_root / SOURCE_ID), result.stdout)
 
     def test_explicit_out_root_is_used_without_falling_back_to_output(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-explicit-") as temp_dir:
             workspace = Path(temp_dir)
             explicit_root = workspace / "custom-artifacts"
-            result = run_canonical_cli(
-                str(SOURCE_FIXTURE),
-                "--out-root",
-                str(explicit_root),
-                cwd=workspace,
-            )
-
+            result = run_canonical_cli(str(SOURCE_FIXTURE), "--out-root", str(explicit_root), cwd=workspace)
             assert_cli_succeeded(self, result)
-            self.assertTrue((explicit_root / SOURCE_ID).is_dir())
+            self.assertTrue(explicit_root.is_dir())
+            self.assertEqual(list(explicit_root.iterdir()), [])
             self.assertFalse((workspace / "output").exists())
 
     def test_without_llm_refine_is_draft_only_and_rejects_final_publication(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-draft-only-") as temp_dir:
             workspace = Path(temp_dir)
-            result = run_canonical_cli(
-                str(SOURCE_FIXTURE),
-                "--template",
-                "compact",
-                cwd=workspace,
-            )
-
-            output_dir = workspace / "output" / SOURCE_ID
+            result = run_canonical_cli(str(SOURCE_FIXTURE), "--template", "compact", cwd=workspace)
             assert_cli_succeeded(self, result)
             message = result.stdout + result.stderr
+            output_dir = workspace / "output" / SOURCE_ID
             self.assertIn("未生成最终稿", message)
-            self.assertIn("_internal/summary_draft.md", message)
-            self.assertIn("_internal/mindmap_draft.mmd", message)
+            self.assertIn("临时转写、分段数据和内部草稿：已清理", message)
             self.assertIn("--llm-refine", message)
-            self.assertEqual(
-                (output_dir / "support" / "transcript.txt").read_text(encoding="utf-8"),
-                OFFLINE_TRANSCRIPT,
-            )
-            self.assertTrue((output_dir / "_internal" / "summary_draft.md").read_text(encoding="utf-8").strip())
-            self.assertTrue((output_dir / "_internal" / "mindmap_draft.mmd").read_text(encoding="utf-8").strip())
-            self.assertFalse((output_dir / "summary.md").exists())
-            self.assertFalse((output_dir / "mindmap.mmd").exists())
-
-            metadata = json.loads((output_dir / "_internal" / "metadata.json").read_text(encoding="utf-8"))
-            self.assertTrue(metadata.get("source"))
-            self.assertTrue(metadata.get("title"))
-            self.assertIsInstance(metadata.get("word_count"), int)
+            self.assertFalse(output_dir.exists())
+            self.assertTrue((workspace / "output").is_dir())
 
     def test_llm_refine_success_publishes_only_final_root_files(self) -> None:
         refined = "# 精校摘要\n\n这里是一行最小实质摘要正文。\n\n```mermaid\nmindmap\n  root((主题))\n```"
@@ -576,8 +535,9 @@ class CanonicalCliContractTests(unittest.TestCase):
                 if path.is_file() and path.parent != output_dir
             }
             self.assertEqual(root_files, {"summary.md", "mindmap.mmd"})
-            self.assertIn("_internal/summary_draft.md", nested_files)
-            self.assertIn("_internal/mindmap_draft.mmd", nested_files)
+            self.assertEqual(nested_files, set())
+            self.assertFalse((output_dir / "support").exists())
+            self.assertFalse((output_dir / "_internal").exists())
             self.assertEqual(
                 (output_dir / "summary.md").read_text(encoding="utf-8").strip(),
                 "# 精校摘要\n\n这里是一行最小实质摘要正文。\n\n```mermaid\nmindmap\n  root((主题))\n```",
@@ -587,17 +547,18 @@ class CanonicalCliContractTests(unittest.TestCase):
             self.assertFalse((output_dir / "mindmap_refined.mmd").exists())
             self.assertFalse((output_dir / "_internal" / "previous_final").exists())
 
-    def test_final_delivery_rejects_unknown_root_directory(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-root-directory-contract-") as temp_dir:
+    def test_final_delivery_preserves_unknown_root_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-unknown-root-") as temp_dir:
             out_dir = Path(temp_dir)
-            (out_dir / "summary.md").write_text("# valid final summary\n", encoding="utf-8")
-            (out_dir / "support").mkdir()
-            (out_dir / "_internal").mkdir()
-            (out_dir / "unexpected").mkdir()
-
+            unknown_dir = out_dir / "user-material"
+            unknown_dir.mkdir(parents=True)
+            (unknown_dir / "notes.txt").write_text("用户内容\n", encoding="utf-8")
             self.assertFalse(final_delivery_ready(out_dir))
+            (out_dir / "summary.md").write_text("# 摘要\n", encoding="utf-8")
+            self.assertTrue(final_delivery_ready(out_dir))
+            self.assertEqual((unknown_dir / "notes.txt").read_text(encoding="utf-8"), "用户内容\n")
 
-    def test_successful_publish_keeps_only_allowed_root_delivery_files(self) -> None:
+    def test_successful_publish_exposes_only_final_files_and_preserves_unknown_user_files(self) -> None:
         cases = (
             (
                 "# 精校摘要\n\n这里是一行最小实质摘要正文。\n\n```mermaid\nmindmap\n  root((主题))\n```",
@@ -613,11 +574,15 @@ class CanonicalCliContractTests(unittest.TestCase):
                     output_root = workspace / "output"
                     output_dir = output_root / local_source_id(source)
                     output_dir.mkdir(parents=True)
-                    (output_dir / "transcript.txt").write_text("旧根层 transcript，足够长的复用文本用于成功发布契约验证。\n", encoding="utf-8")
+                    reuse_transcript = workspace / "reuse-transcript.txt"
+                    reuse_transcript.write_text("显式本地转写，足够长的复用文本用于成功发布契约验证。\n", encoding="utf-8")
                     (output_dir / "summary_refined.md").write_text("旧兼容摘要\n", encoding="utf-8")
                     (output_dir / "mindmap_refined.mmd").write_text("旧兼容脑图\n", encoding="utf-8")
                     (output_dir / "mindmap.mmd").write_text("旧最终脑图\n", encoding="utf-8")
-                    (output_dir / "unexpected.txt").write_text("未知残留\n", encoding="utf-8")
+                    (output_dir / "unexpected.txt").write_text("用户笔记，不得删除\n", encoding="utf-8")
+                    user_dir = output_dir / "user-data" / "nested"
+                    user_dir.mkdir(parents=True)
+                    (user_dir / "keep.json").write_text("{\"keep\": true}\n", encoding="utf-8")
 
                     previous_argv = sys.argv
                     sys.argv = [
@@ -626,6 +591,7 @@ class CanonicalCliContractTests(unittest.TestCase):
                         "--template",
                         "compact",
                         "--reuse-transcript",
+                        str(reuse_transcript),
                         "--llm-refine",
                         "--out-root",
                         str(output_root),
@@ -639,56 +605,61 @@ class CanonicalCliContractTests(unittest.TestCase):
                         sys.argv = previous_argv
 
                     root_files = {path.name for path in output_dir.iterdir() if path.is_file()}
-                    self.assertEqual(root_files, expected_root_files)
-                    self.assertTrue((output_dir / "support" / "transcript.txt").is_file())
+                    self.assertEqual(root_files, expected_root_files | {"unexpected.txt"})
+                    self.assertFalse((output_dir / "support").exists())
+                    self.assertFalse((output_dir / "_internal").exists())
                     self.assertFalse((output_dir / "summary_refined.md").exists())
                     self.assertFalse((output_dir / "mindmap_refined.mmd").exists())
                     self.assertFalse((output_dir / "transcript.txt").exists())
-                    self.assertFalse((output_dir / "unexpected.txt").exists())
+                    self.assertEqual(
+                        (output_dir / "unexpected.txt").read_text(encoding="utf-8"),
+                        "用户笔记，不得删除\n",
+                    )
+                    self.assertEqual(
+                        (output_dir / "user-data" / "nested" / "keep.json").read_text(encoding="utf-8"),
+                        "{\"keep\": true}\n",
+                    )
+                    published_paths = {
+                        path.relative_to(output_dir).as_posix()
+                        for path in output_dir.rglob("*")
+                        if path.is_file()
+                    }
+                    self.assertNotIn("summary_draft.md", published_paths)
+                    self.assertNotIn("transcript_segments.json", published_paths)
                     if expected_root_files == {"summary.md"}:
                         self.assertFalse((output_dir / "mindmap.mmd").exists())
                     else:
                         self.assertTrue((output_dir / "mindmap.mmd").is_file())
 
-    def test_new_run_moves_legacy_root_subtitles_under_internal(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-new-run-subtitle-cleanup-") as temp_dir:
+    def test_new_run_removes_legacy_root_subtitles_without_archiving_them(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-subtitle-cleanup-") as temp_dir:
+            out_dir = Path(temp_dir)
+            (out_dir / "subtitle.zh-Hans.vtt").write_text("WEBVTT\n", encoding="utf-8")
+            (out_dir / "notes.txt").write_text("用户文件\n", encoding="utf-8")
+            canonical_cli.prepare_output_directory(out_dir) if hasattr(canonical_cli, "prepare_output_directory") else None
+            from video_summary.outputs import prepare_output_directory
+            prepare_output_directory(out_dir)
+            self.assertFalse((out_dir / "subtitle.zh-Hans.vtt").exists())
+            self.assertFalse((out_dir / "_internal").exists())
+            self.assertTrue((out_dir / "notes.txt").exists())
+
+    def test_draft_only_rerun_preserves_current_delivery_and_unknown_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-draft-rerun-") as temp_dir:
             workspace = Path(temp_dir)
             output_dir = workspace / "output" / SOURCE_ID
             output_dir.mkdir(parents=True)
-            legacy_subtitle = output_dir / "subtitle.zh-Hans.vtt"
-            legacy_subtitle.write_text("WEBVTT\n\n旧字幕\n", encoding="utf-8")
-
-            result = run_canonical_cli(str(SOURCE_FIXTURE), "--template", "compact", cwd=workspace)
-
+            (output_dir / "summary.md").write_text("旧摘要\n", encoding="utf-8")
+            (output_dir / "mindmap.mmd").write_text("旧脑图\n", encoding="utf-8")
+            (output_dir / "notes.txt").write_text("用户文件\n", encoding="utf-8")
+            (output_dir / "summary_refined.md").write_text("旧兼容稿\n", encoding="utf-8")
+            result = run_canonical_cli(str(SOURCE_FIXTURE), cwd=workspace)
             assert_cli_succeeded(self, result)
-            self.assertFalse(legacy_subtitle.exists())
-            self.assertEqual(
-                (output_dir / "_internal" / "subtitle.zh-Hans.vtt").read_text(encoding="utf-8"),
-                "WEBVTT\n\n旧字幕\n",
-            )
-            root_subtitles = [path.name for path in output_dir.glob("subtitle.*") if path.is_file()]
-            self.assertEqual(root_subtitles, [])
-
-    def test_draft_only_rerun_hides_stale_final_files_in_previous_final_archive(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-draft-stale-final-") as temp_dir:
-            workspace = Path(temp_dir)
-            output_dir = workspace / "output" / SOURCE_ID
-            output_dir.mkdir(parents=True)
-            (output_dir / "summary.md").write_text("上次最终摘要\n", encoding="utf-8")
-            (output_dir / "mindmap.mmd").write_text("mindmap\n  root((上次最终脑图))\n", encoding="utf-8")
-
-            result = run_canonical_cli(str(SOURCE_FIXTURE), "--template", "compact", cwd=workspace)
-
-            assert_cli_succeeded(self, result)
-            message = result.stdout + result.stderr
-            archive = output_dir / "_internal" / "previous_final"
-            self.assertFalse((output_dir / "summary.md").exists())
-            self.assertFalse((output_dir / "mindmap.mmd").exists())
-            self.assertEqual((archive / "summary.md").read_text(encoding="utf-8"), "上次最终摘要\n")
-            self.assertEqual((archive / "mindmap.mmd").read_text(encoding="utf-8"), "mindmap\n  root((上次最终脑图))\n")
-            self.assertIn("_internal/previous_final/", message)
-            self.assertIn("旧最终稿", message)
-            self.assertIn("transcript.txt", message)
+            self.assertEqual((output_dir / "summary.md").read_text(encoding="utf-8"), "旧摘要\n")
+            self.assertEqual((output_dir / "mindmap.mmd").read_text(encoding="utf-8"), "旧脑图\n")
+            self.assertEqual((output_dir / "notes.txt").read_text(encoding="utf-8"), "用户文件\n")
+            self.assertFalse((output_dir / "summary_refined.md").exists())
+            self.assertFalse((output_dir / "_internal").exists())
+            self.assertFalse((output_dir / "support").exists())
 
     def test_llm_refine_failure_hides_stale_final_files_and_returns_nonzero(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-llm-failure-stale-final-") as temp_dir:
@@ -726,52 +697,29 @@ class CanonicalCliContractTests(unittest.TestCase):
             error = stderr.getvalue()
             self.assertIn("ERROR: 阶段=LLM精校；", error)
             self.assertIn("LLM 请求失败", error)
-            self.assertIn("_internal/previous_final/", error)
-            self.assertIn("旧最终稿", error)
+            self.assertNotIn("previous_final", error)
             self.assertNotIn("Traceback", error)
-            self.assertFalse((output_dir / "summary.md").exists())
-            self.assertFalse((output_dir / "mindmap.mmd").exists())
-            self.assertEqual((archive / "summary.md").read_text(encoding="utf-8"), "上次最终摘要\n")
-            self.assertEqual((archive / "mindmap.mmd").read_text(encoding="utf-8"), "mindmap\n  root((上次最终脑图))\n")
-            self.assertEqual((archive / "summary_refined.md").read_text(encoding="utf-8"), "上次兼容摘要\n")
-            self.assertEqual((archive / "mindmap_refined.mmd").read_text(encoding="utf-8"), "mindmap\n  root((上次兼容脑图))\n")
+            self.assertFalse(output_dir.exists())
+            self.assertFalse(archive.exists())
 
-    def test_llm_failure_reports_legacy_archived_finals(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-llm-failure-legacy-archive-") as temp_dir:
+    def test_llm_failure_does_not_create_legacy_archive(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-llm-failure-no-archive-") as temp_dir:
             workspace = Path(temp_dir)
             output_dir = workspace / "output" / SOURCE_ID
             output_dir.mkdir(parents=True)
-            (output_dir / "summary_refined.md").write_text("上次兼容摘要\n", encoding="utf-8")
-            (output_dir / "mindmap_refined.mmd").write_text("上次兼容脑图\n", encoding="utf-8")
-
+            (output_dir / "summary.md").write_text("旧摘要\n", encoding="utf-8")
             previous_argv = sys.argv
-            sys.argv = [
-                str(REPO_ROOT / "src" / "video_summary_cli.py"),
-                str(SOURCE_FIXTURE),
-                "--template",
-                "compact",
-                "--llm-refine",
-                "--out-root",
-                str(workspace / "output"),
-            ]
+            sys.argv = [str(REPO_ROOT / "src" / "video_summary_cli.py"), str(SOURCE_FIXTURE), "--out-root", str(workspace / "output"), "--llm-refine"]
             stderr = io.StringIO()
             try:
-                with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
-                    llm_module, "call_llm", side_effect=RuntimeError("LLM 请求失败")
-                ), contextlib.redirect_stderr(stderr):
-                    with self.assertRaises(SystemExit) as raised:
+                with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(llm_module, "call_llm", return_value="好的。"), contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit):
                         canonical_cli.main()
             finally:
                 sys.argv = previous_argv
-
-            error = stderr.getvalue()
-            self.assertNotEqual(raised.exception.code, 0)
-            self.assertIn("ERROR: 阶段=LLM精校；", error)
-            self.assertIn("LLM 请求失败", error)
-            self.assertIn("_internal/previous_final/", error)
-            self.assertIn("旧最终稿", error)
-            self.assertFalse((output_dir / "summary.md").exists())
-            self.assertFalse((output_dir / "mindmap.mmd").exists())
+            self.assertNotIn("previous_final", stderr.getvalue())
+            self.assertFalse((output_dir / "_internal" / "previous_final").exists())
+            self.assertFalse(output_dir.exists())
 
     def test_llm_refine_publishes_summary_without_mindmap(self) -> None:
         refined = "# 只有正文的最终摘要\n\n这里没有 Mermaid 脑图。"
@@ -876,39 +824,29 @@ class CanonicalCliContractTests(unittest.TestCase):
             source = workspace / "empty.pdf"
             source.write_bytes(b"%PDF-empty")
             fake_pypdf = types.ModuleType("pypdf")
-
             class Page:
                 def extract_text(self) -> str:
                     return ""
-
             class PdfReader:
                 def __init__(self, path: str) -> None:
                     self.pages = [Page()]
-
             fake_pypdf.PdfReader = PdfReader
             previous_argv = sys.argv
-            sys.argv = [
-                str(REPO_ROOT / "src" / "video_summary_cli.py"),
-                str(source),
-                "--out-root",
-                str(workspace / "output"),
-            ]
+            sys.argv = [str(REPO_ROOT / "src" / "video_summary_cli.py"), str(source), "--out-root", str(workspace / "output")]
             stderr = io.StringIO()
             try:
-                with mock.patch.dict(sys.modules, {"pypdf": fake_pypdf}), mock.patch.object(
-                    canonical_cli, "download_audio", return_value=workspace / "audio.mp3"
-                ), mock.patch.object(canonical_cli, "transcribe_audio", return_value=""), contextlib.redirect_stderr(stderr):
+                with mock.patch.dict(sys.modules, {"pypdf": fake_pypdf}), contextlib.redirect_stderr(stderr):
                     with self.assertRaises(SystemExit) as raised:
                         canonical_cli.main()
             finally:
                 sys.argv = previous_argv
-
             error = stderr.getvalue()
             self.assertNotEqual(raised.exception.code, 0)
             self.assertIn("ERROR: 阶段=PDF/DOCX文本提取；", error)
             self.assertIn("图像型 PDF", error)
             self.assertIn("文本层", error)
-            self.assertNotIn("转写文本过短", error)
+            self.assertFalse((workspace / "output" / local_source_id(source)).exists())
+            self.assertEqual(list((workspace / "output").iterdir()), [])
 
     def test_empty_docx_reports_document_text_too_short(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-empty-docx-") as temp_dir:
@@ -1012,130 +950,82 @@ class CanonicalCliContractTests(unittest.TestCase):
                 download_audio.assert_not_called()
                 transcribe_audio.assert_not_called()
 
-    def test_draft_only_files_stay_under_internal_directory(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-draft-files-") as temp_dir:
+    def test_draft_only_files_are_removed_with_the_run_workspace(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-draft-cleanup-") as temp_dir:
             workspace = Path(temp_dir)
-            result = run_canonical_cli(str(SOURCE_FIXTURE), cwd=workspace)
-
-            output_dir = workspace / "output" / SOURCE_ID
-            root_files = {path.name for path in output_dir.iterdir() if path.is_file()}
-            nested_files = {
-                path.relative_to(output_dir).as_posix()
-                for path in output_dir.rglob("*")
-                if path.is_file() and path.parent != output_dir
-            }
-
-        assert_cli_succeeded(self, result)
-        self.assertEqual(root_files, set(), msg=f"root files: {sorted(root_files)}")
-        self.assertTrue(nested_files, msg="internal artifacts were not written under _internal/")
-        self.assertTrue(
-            all(relative_path.startswith(("_internal/", "support/")) for relative_path in nested_files),
-            msg=f"unexpected files: {sorted(nested_files)}",
-        )
-        self.assertIn("_internal/metadata.json", nested_files)
-        self.assertIn("_internal/summary_draft.md", nested_files)
-        self.assertIn("_internal/mindmap_draft.mmd", nested_files)
+            result = run_canonical_cli(str(SOURCE_FIXTURE), "--template", "compact", cwd=workspace)
+            assert_cli_succeeded(self, result)
+            output_root = workspace / "output"
+            self.assertTrue(output_root.is_dir())
+            self.assertEqual(list(output_root.iterdir()), [])
+            self.assertNotIn("support/", result.stdout)
+            self.assertNotIn("_internal/", result.stdout)
 
     def test_draft_only_message_explains_final_publication_requirement(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-output-roles-") as temp_dir:
-            result = run_canonical_cli(str(SOURCE_FIXTURE), "--template", "compact", cwd=Path(temp_dir))
-
+        with tempfile.TemporaryDirectory(prefix="video-summary-draft-message-") as temp_dir:
+            result = run_canonical_cli(str(SOURCE_FIXTURE), cwd=Path(temp_dir))
         assert_cli_succeeded(self, result)
         message = result.stdout + result.stderr
         self.assertIn("未生成最终稿", message)
-        self.assertIn("_internal/summary_draft.md", message)
-        self.assertIn("_internal/mindmap_draft.mmd", message)
-        self.assertIn("--llm-refine", message)
+        self.assertIn("已随运行结束清理", message)
+        self.assertIn("如需发布最终稿，请使用 --llm-refine", message)
 
     def test_same_stem_local_sources_use_distinct_reusable_output_directories(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-source-id-") as temp_dir:
             workspace = Path(temp_dir)
             output_root = workspace / "artifacts"
-            sources = [
-                workspace / "same-name.pdf",
-                workspace / "same-name.docx",
-                workspace / "same-name.mp4",
-            ]
+            sources = [workspace / "same-name.pdf", workspace / "same-name.docx", workspace / "same-name.mp4"]
             source_ids = {source: local_source_id(source) for source in sources}
-            expected_ids = set(source_ids.values())
-
+            reuse_paths = {}
             for source, source_id in source_ids.items():
-                source.write_bytes(b"not a valid source")
+                source.write_bytes(b"fixture")
                 output_dir = output_root / source_id
                 output_dir.mkdir(parents=True)
-                (output_dir / "transcript.txt").write_text(
-                    f"这是 {source.suffix} 的预置逐字稿，用于验证 source-id 隔离。",
-                    encoding="utf-8",
-                )
-
-            for source in sources:
+                reuse_paths[source] = workspace / f"reuse-{source.suffix[1:]}.txt"
+                reuse_paths[source].write_text(f"这是 {source.suffix} 的显式本地逐字稿，用于验证 source-id 隔离。", encoding="utf-8")
+            for source, source_id in source_ids.items():
                 result = run_canonical_cli(
                     str(source),
                     "--out-root",
                     str(output_root),
                     "--reuse-transcript",
-                    "--template",
-                    "compact",
+                    str(reuse_paths[source]),
                     cwd=workspace,
                 )
                 assert_cli_succeeded(self, result)
-
-            self.assertEqual(
-                {path.name for path in output_root.iterdir() if path.is_dir()},
-                expected_ids,
-            )
-            for source_id in expected_ids:
-                output_dir = output_root / source_id
-                self.assertTrue((output_dir / "_internal" / "summary_draft.md").exists())
-                self.assertTrue((output_dir / "_internal" / "mindmap_draft.mmd").exists())
-                self.assertFalse((output_dir / "summary.md").exists())
-                self.assertFalse((output_dir / "mindmap.mmd").exists())
+                self.assertIn(str(output_root / source_id), result.stdout)
+            self.assertEqual(list(output_root.iterdir()), [])
 
     def test_same_stem_and_extension_local_sources_use_distinct_reusable_output_directories(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-source-id-collision-") as temp_dir:
             workspace = Path(temp_dir)
             output_root = workspace / "artifacts"
-            sources = [
-                workspace / "left" / "same-name.docx",
-                workspace / "right" / "same-name.docx",
-            ]
-            source_ids = {source: local_source_id(source) for source in sources}
-
-            for source, source_id in source_ids.items():
-                source.parent.mkdir(parents=True)
-                source.write_bytes(b"not a valid source")
-                output_dir = output_root / source_id
-                output_dir.mkdir(parents=True)
-                (output_dir / "transcript.txt").write_text(
-                    f"这是 {source.parent.name} 目录中的预置逐字稿，用于验证同名同扩展隔离。",
-                    encoding="utf-8",
-                )
-
+            sources = [workspace / "left" / "same-name.docx", workspace / "right" / "same-name.docx"]
+            source_ids = {}
+            reuse_paths = {}
             for source in sources:
+                source.parent.mkdir(parents=True)
+                source.write_bytes(b"fixture")
+                source_ids[source] = local_source_id(source)
+                output_dir = output_root / source_ids[source]
+                output_dir.mkdir(parents=True)
+                reuse_paths[source] = workspace / f"{source.parent.name}-transcript.txt"
+                reuse_paths[source].write_text("这是同名同扩展文件的显式本地逐字稿内容，长度足够用于复用测试。", encoding="utf-8")
+            self.assertNotEqual(*source_ids.values())
+            for source, source_id in source_ids.items():
                 result = run_canonical_cli(
                     str(source),
                     "--out-root",
                     str(output_root),
                     "--reuse-transcript",
-                    "--template",
-                    "compact",
+                    str(reuse_paths[source]),
                     cwd=workspace,
                 )
                 assert_cli_succeeded(self, result)
+                self.assertIn(str(output_root / source_id), result.stdout)
+            self.assertEqual(list(output_root.iterdir()), [])
 
-            self.assertEqual(
-                {path.name for path in output_root.iterdir() if path.is_dir()},
-                set(source_ids.values()),
-            )
-            self.assertNotEqual(*source_ids.values())
-            for source_id in source_ids.values():
-                output_dir = output_root / source_id
-                self.assertTrue((output_dir / "_internal" / "summary_draft.md").exists())
-                self.assertTrue((output_dir / "_internal" / "mindmap_draft.mmd").exists())
-                self.assertFalse((output_dir / "summary.md").exists())
-                self.assertFalse((output_dir / "mindmap.mmd").exists())
-
-    def test_reuse_run_moves_legacy_root_subtitles_under_internal(self) -> None:
+    def test_reuse_run_removes_legacy_root_subtitles_without_archiving_them(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-reuse-subtitle-cleanup-") as temp_dir:
             workspace = Path(temp_dir)
             source = workspace / "unreadable.docx"
@@ -1143,65 +1033,41 @@ class CanonicalCliContractTests(unittest.TestCase):
             output_root = workspace / "artifacts"
             output_dir = output_root / local_source_id(source)
             output_dir.mkdir(parents=True)
-            (output_dir / "transcript.txt").write_text("复用逐字稿内容足够长，用于验证旧根级字幕会迁移到内部目录。", encoding="utf-8")
+            reuse_transcript = workspace / "reuse-transcript.txt"
+            reuse_transcript.write_text("显式本地复用逐字稿内容足够长，用于验证旧根级字幕会被清理。", encoding="utf-8")
             legacy_subtitle = output_dir / "subtitle.zh-Hans.vtt"
-            legacy_subtitle.write_text("WEBVTT\n\n复用旧字幕\n", encoding="utf-8")
-
+            legacy_subtitle.write_text("WEBVTT\n", encoding="utf-8")
             result = run_canonical_cli(
                 str(source),
                 "--out-root",
                 str(output_root),
                 "--reuse-transcript",
-                "--template",
-                "compact",
+                str(reuse_transcript),
                 cwd=workspace,
             )
-
             assert_cli_succeeded(self, result)
             self.assertFalse(legacy_subtitle.exists())
-            self.assertEqual(
-                (output_dir / "_internal" / "subtitle.zh-Hans.vtt").read_text(encoding="utf-8"),
-                "WEBVTT\n\n复用旧字幕\n",
-            )
-            root_subtitles = [path.name for path in output_dir.glob("subtitle.*") if path.is_file()]
-            self.assertEqual(root_subtitles, [])
+            self.assertFalse((output_dir / "support").exists())
+            self.assertFalse((output_dir / "_internal").exists())
 
     def test_reuse_transcript_rebuilds_segments_from_current_text_for_chapters_and_llm(self) -> None:
         old_segment_text = "旧分段内容：不应出现在本轮章节或 LLM 提示中。"
-        current_transcript = (
-            "[00:00] 新文本第一段：本轮 transcript 才是复用模式的唯一事实来源。\n"
-            "[00:10] 新文本第二段：章节和 LLM 提示必须使用当前文本。\n"
-        )
-        expected_segment_texts = [
-            "新文本第一段：本轮 transcript 才是复用模式的唯一事实来源。",
-            "新文本第二段：章节和 LLM 提示必须使用当前文本。",
-        ]
-
+        current_transcript = "[00:00] 新文本第一段：本轮 transcript 才是复用模式的唯一事实来源。\n[00:10] 新文本第二段：章节和 LLM 提示必须使用当前文本。\n"
         with tempfile.TemporaryDirectory(prefix="video-summary-reuse-refresh-derived-") as temp_dir:
             workspace = Path(temp_dir)
             source = workspace / "unreadable.docx"
             source.write_bytes(b"not an OOXML document")
             output_root = workspace / "artifacts"
             output_dir = output_root / local_source_id(source)
-            internal_dir = output_dir / "_internal"
-            internal_dir.mkdir(parents=True)
-            (output_dir / "transcript.txt").write_text(current_transcript, encoding="utf-8")
-            (internal_dir / "transcript_segments.json").write_text(
-                json.dumps(
-                    [{"start": 0.0, "end": 8.0, "text": old_segment_text}],
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-
+            output_dir.mkdir(parents=True)
+            reuse_transcript = workspace / "reuse-transcript.txt"
+            reuse_transcript.write_text(current_transcript, encoding="utf-8")
+            (output_dir / "_internal").mkdir()
+            (output_dir / "_internal" / "transcript_segments.json").write_text(json.dumps([{"start": 0.0, "end": 8.0, "text": old_segment_text}], ensure_ascii=False), encoding="utf-8")
             prompts: list[str] = []
-
             def fake_call_llm(prompt: str, model: str, api_kind: str) -> str:
                 prompts.append(prompt)
-                if "Chunk transcript:" in prompt:
-                    return "# 分段精校结果\n\n分段摘要正文。"
                 return "# 最终精修稿\n\n最终摘要正文。"
-
             previous_argv = sys.argv
             sys.argv = [
                 str(REPO_ROOT / "src" / "video_summary_cli.py"),
@@ -1209,36 +1075,20 @@ class CanonicalCliContractTests(unittest.TestCase):
                 "--out-root",
                 str(output_root),
                 "--reuse-transcript",
-                "--content-type",
-                "lecture",
+                str(reuse_transcript),
                 "--llm-refine",
-                "--llm-max-chars",
-                "60",
             ]
-            stdout = io.StringIO()
-            stderr = io.StringIO()
             try:
-                with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
-                    llm_module, "call_llm", side_effect=fake_call_llm
-                ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(llm_module, "call_llm", side_effect=fake_call_llm), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     canonical_cli.main()
             finally:
                 sys.argv = previous_argv
-
-            segments = json.loads(
-                (internal_dir / "transcript_segments.json").read_text(encoding="utf-8")
-            )
-            timed_transcript = (internal_dir / "transcript_timed.txt").read_text(encoding="utf-8")
-            draft_summary = (internal_dir / "summary_draft.md").read_text(encoding="utf-8")
-
-            self.assertEqual([item["text"] for item in segments], expected_segment_texts)
-            self.assertIn("新文本第一段", timed_transcript)
-            self.assertIn("新文本第二段", timed_transcript)
-            self.assertNotIn(old_segment_text, timed_transcript)
-            self.assertNotIn(old_segment_text, draft_summary)
             self.assertTrue(prompts)
             self.assertTrue(any("新文本第一段" in prompt for prompt in prompts))
             self.assertTrue(all(old_segment_text not in prompt for prompt in prompts))
+            self.assertTrue((output_dir / "summary.md").is_file())
+            self.assertFalse((output_dir / "_internal").exists())
+            self.assertFalse((output_dir / "support").exists())
 
     def test_reuse_transcript_rejects_any_url_scheme_before_output_or_network_access(self) -> None:
         url_sources = (
@@ -1250,6 +1100,8 @@ class CanonicalCliContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="video-summary-reuse-url-schemes-") as temp_dir:
             workspace = Path(temp_dir)
             output_root = workspace / "artifacts"
+            reuse_transcript = workspace / "reuse-transcript.txt"
+            reuse_transcript.write_text("显式本地转写，用于验证 URL 输入仍在输出准备阶段被拒绝。", encoding="utf-8")
             for source in url_sources:
                 with self.subTest(source=source):
                     previous_argv = sys.argv
@@ -1260,6 +1112,7 @@ class CanonicalCliContractTests(unittest.TestCase):
                         "--out-root",
                         str(output_root),
                         "--reuse-transcript",
+                        str(reuse_transcript),
                     ]
                     try:
                         with mock.patch.object(
@@ -1287,6 +1140,8 @@ class CanonicalCliContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="video-summary-reuse-online-") as temp_dir:
             workspace = Path(temp_dir)
             output_root = workspace / "artifacts"
+            reuse_transcript = workspace / "reuse-transcript.txt"
+            reuse_transcript.write_text("显式本地转写，用于验证在线 URL 不能进入复用流程。", encoding="utf-8")
             previous_argv = sys.argv
             stderr = io.StringIO()
             sys.argv = [
@@ -1295,6 +1150,7 @@ class CanonicalCliContractTests(unittest.TestCase):
                 "--out-root",
                 str(output_root),
                 "--reuse-transcript",
+                str(reuse_transcript),
             ]
             try:
                 with mock.patch.object(canonical_cli, "source_id_without_access", side_effect=AssertionError("source-id accessed")), mock.patch.object(
@@ -1320,32 +1176,25 @@ class CanonicalCliContractTests(unittest.TestCase):
             workspace = Path(temp_dir)
             source = workspace / "unreadable.docx"
             source.write_bytes(b"not an OOXML document")
-
             output_root = workspace / "artifacts"
             output_dir = output_root / local_source_id(source)
             output_dir.mkdir(parents=True)
-            transcript = "这是预先存在的离线逐字稿，用于验证复用模式不读取源文件。"
-            (output_dir / "transcript.txt").write_text(transcript, encoding="utf-8")
-
+            transcript = "这是显式本地离线逐字稿，用于验证复用模式不读取源文件。"
+            reuse_transcript = workspace / "reuse-transcript.txt"
+            reuse_transcript.write_text(transcript, encoding="utf-8")
             result = run_canonical_cli(
                 str(source),
                 "--out-root",
                 str(output_root),
                 "--reuse-transcript",
+                str(reuse_transcript),
                 "--template",
                 "compact",
                 cwd=workspace,
             )
-
             assert_cli_succeeded(self, result)
-            self.assertEqual(
-                (output_dir / "support" / "transcript.txt").read_text(encoding="utf-8"),
-                transcript,
-            )
-            self.assertTrue((output_dir / "_internal" / "summary_draft.md").exists())
-            self.assertTrue((output_dir / "_internal" / "mindmap_draft.mmd").exists())
-            self.assertFalse((output_dir / "summary.md").exists())
-            self.assertFalse((output_dir / "mindmap.mmd").exists())
+            self.assertFalse(output_dir.exists())
+            self.assertNotIn("文档文本为空或过短", result.stderr)
 
 
     def test_llm_success_stdout_names_final_summary_and_mindmap(self) -> None:
@@ -1403,47 +1252,34 @@ class CanonicalCliContractTests(unittest.TestCase):
         self.assertIn("脑图：未生成（LLM 未返回有效 Mermaid，按需生成）", message)
 
     def test_no_llm_stdout_marks_transcript_and_internal_files_as_non_final(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-stdout-draft-only-contract-") as temp_dir:
-            result = run_canonical_cli(str(SOURCE_FIXTURE), "--template", "compact", cwd=Path(temp_dir))
-
-        assert_cli_succeeded(self, result)
-        message = result.stdout + result.stderr
-        self.assertIn("最终稿：未生成", message)
-        self.assertIn("support/transcript.txt：依据材料，不是最终稿", message)
-        self.assertIn("_internal/summary_draft.md：内部草稿，不是最终稿", message)
-        self.assertIn("_internal/mindmap_draft.mmd：内部草稿，不是最终稿", message)
-        self.assertIn("_internal/*：内部状态（草稿/缓存/元数据），全部不是最终稿", message)
+        with tempfile.TemporaryDirectory(prefix="video-summary-no-llm-output-") as temp_dir:
+            workspace = Path(temp_dir)
+            result = run_canonical_cli(str(SOURCE_FIXTURE), cwd=workspace)
+            assert_cli_succeeded(self, result)
+            message = result.stdout + result.stderr
+            self.assertIn("最终稿：未生成", message)
+            self.assertIn("临时转写、分段数据和内部草稿：已清理", message)
+            self.assertEqual(list((workspace / "output").iterdir()), [])
 
     def test_llm_failure_error_marks_transcript_and_internal_files_as_non_final(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="video-summary-stderr-failure-contract-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="video-summary-llm-failure-cleanup-") as temp_dir:
             workspace = Path(temp_dir)
+            output_dir = workspace / "output" / SOURCE_ID
+            output_dir.mkdir(parents=True)
+            (output_dir / "summary.md").write_text("旧摘要\n", encoding="utf-8")
+            (output_dir / "mindmap.mmd").write_text("旧脑图\n", encoding="utf-8")
             previous_argv = sys.argv
-            sys.argv = [
-                str(REPO_ROOT / "src" / "video_summary_cli.py"),
-                str(SOURCE_FIXTURE),
-                "--template",
-                "compact",
-                "--llm-refine",
-                "--out-root",
-                str(workspace / "output"),
-            ]
+            sys.argv = [str(REPO_ROOT / "src" / "video_summary_cli.py"), str(SOURCE_FIXTURE), "--out-root", str(workspace / "output"), "--llm-refine"]
             stderr = io.StringIO()
             try:
-                with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
-                    llm_module, "call_llm", side_effect=RuntimeError("LLM 请求失败")
-                ), contextlib.redirect_stderr(stderr):
+                with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), mock.patch.object(llm_module, "call_llm", return_value="# 摘要\n\n抱歉，我无法完成这个请求。"), contextlib.redirect_stderr(stderr):
                     with self.assertRaises(SystemExit) as raised:
                         canonical_cli.main()
             finally:
                 sys.argv = previous_argv
-
-        self.assertNotEqual(raised.exception.code, 0)
-        error = stderr.getvalue()
-        self.assertIn("最终稿：未生成", error)
-        self.assertIn("support/transcript.txt：依据材料，不是最终稿", error)
-        self.assertIn("_internal/summary_draft.md：内部草稿，不是最终稿", error)
-        self.assertIn("_internal/mindmap_draft.mmd：内部草稿，不是最终稿", error)
-        self.assertIn("_internal/*：内部状态（草稿/缓存/元数据），全部不是最终稿", error)
+            self.assertNotEqual(raised.exception.code, 0)
+            self.assertIn("LLM精校", stderr.getvalue())
+            self.assertFalse(output_dir.exists())
 
     def test_post_publish_archive_cleanup_failure_is_warning_after_final_publish(self) -> None:
         refined = "# 精校摘要\n\n这里是一行最小实质摘要正文。\n\n```mermaid\nmindmap\n  root((主题))\n```"
@@ -1536,7 +1372,11 @@ class CanonicalCliContractTests(unittest.TestCase):
                     finally:
                         sys.argv = previous_argv
 
-                    root_files = {path.name for path in output_dir.iterdir() if path.is_file()}
+                    root_files = (
+                        {path.name for path in output_dir.iterdir() if path.is_file()}
+                        if output_dir.exists()
+                        else set()
+                    )
                     self.assertNotEqual(raised.exception.code, 0)
                     self.assertIn("ERROR: 阶段=PDF/DOCX文本提取；", stderr.getvalue())
                     self.assertEqual(root_files, set(), msg=f"stale root files: {sorted(root_files)}")
@@ -1546,91 +1386,74 @@ class CanonicalCliContractTests(unittest.TestCase):
                     transcribe_audio.assert_not_called()
 
     def test_early_document_short_failure_cleans_legacy_root_intermediates(self) -> None:
-        intermediate_files = (
-            "metadata.json",
-            "transcription.json",
-            "transcript_segments.json",
-            "transcript_timed.txt",
-            "summary_chunks.json",
-            "audio.mp3",
-        )
+        intermediate_files = ("metadata.json", "transcription.json", "transcript_segments.json", "transcript_timed.txt", "summary_chunks.json", "audio.mp3")
         with tempfile.TemporaryDirectory(prefix="video-summary-early-document-cleanup-") as temp_dir:
             workspace = Path(temp_dir)
             output_dir = workspace / "output" / SOURCE_ID
             output_dir.mkdir(parents=True)
             for filename in intermediate_files:
                 path = output_dir / filename
-                if path.suffix == ".mp3":
-                    path.write_bytes(b"legacy audio")
-                else:
-                    path.write_text(f"legacy {filename}\n", encoding="utf-8")
+                path.write_bytes(b"legacy audio") if path.suffix == ".mp3" else path.write_text("legacy\n", encoding="utf-8")
             (output_dir / "summary.md").write_text("旧最终摘要\n", encoding="utf-8")
             (output_dir / "mindmap.mmd").write_text("旧最终脑图\n", encoding="utf-8")
-
             previous_argv = sys.argv
-            sys.argv = [
-                str(REPO_ROOT / "src" / "video_summary_cli.py"),
-                str(SOURCE_FIXTURE),
-                "--out-root",
-                str(workspace / "output"),
-            ]
+            sys.argv = [str(REPO_ROOT / "src" / "video_summary_cli.py"), str(SOURCE_FIXTURE), "--out-root", str(workspace / "output")]
             stderr = io.StringIO()
             try:
-                with mock.patch.object(canonical_cli, "extract_document_text", return_value="太短"), mock.patch.object(
-                    canonical_cli, "download_audio", return_value=workspace / "audio.mp3"
-                ) as download_audio, mock.patch.object(
-                    canonical_cli, "transcribe_audio", return_value="足够长的转写文本"
-                ) as transcribe_audio, contextlib.redirect_stderr(stderr):
+                with mock.patch.object(canonical_cli, "extract_document_text", return_value="太短"), mock.patch.object(canonical_cli, "download_audio") as download_audio, mock.patch.object(canonical_cli, "transcribe_audio") as transcribe_audio, contextlib.redirect_stderr(stderr):
                     with self.assertRaises(SystemExit) as raised:
                         canonical_cli.main()
             finally:
                 sys.argv = previous_argv
-
-            archive = output_dir / "_internal" / "previous_final"
-            root_files = {path.name for path in output_dir.iterdir() if path.is_file()}
             self.assertNotEqual(raised.exception.code, 0)
-            self.assertIn("ERROR: 阶段=PDF/DOCX文本提取；", stderr.getvalue())
-            self.assertIn("文档文本为空或过短，无法生成摘要", stderr.getvalue())
-            self.assertEqual(root_files, set(), msg=f"legacy root files: {sorted(root_files)}")
-            for filename in intermediate_files:
-                self.assertFalse((output_dir / filename).exists())
-            self.assertFalse((output_dir / "summary.md").exists())
-            self.assertFalse((output_dir / "mindmap.mmd").exists())
-            self.assertEqual((archive / "summary.md").read_text(encoding="utf-8"), "旧最终摘要\n")
-            self.assertEqual((archive / "mindmap.mmd").read_text(encoding="utf-8"), "旧最终脑图\n")
+            self.assertIn("文档文本为空或过短", stderr.getvalue())
+            self.assertEqual((output_dir / "summary.md").read_text(encoding="utf-8"), "旧最终摘要\n")
+            self.assertEqual((output_dir / "mindmap.mmd").read_text(encoding="utf-8"), "旧最终脑图\n")
+            self.assertFalse(any((output_dir / name).exists() for name in intermediate_files))
+            self.assertFalse((output_dir / "_internal" / "previous_final").exists())
             download_audio.assert_not_called()
             transcribe_audio.assert_not_called()
 
 
-    def test_reuse_missing_both_transcript_locations_fails_before_source_access(self) -> None:
+    def test_reuse_transcript_missing_or_unreadable_path_is_reported_clearly(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-reuse-missing-") as temp_dir:
             workspace = Path(temp_dir)
             source = workspace / "not-readable.docx"
             output_root = workspace / "artifacts"
-            output_dir = output_root / local_source_id(source)
-            output_dir.mkdir(parents=True)
+            cases = (
+                workspace / "missing-transcript.txt",
+                workspace / "transcript-directory",
+            )
+            cases[1].mkdir()
 
-            previous_argv = sys.argv
-            stderr = io.StringIO()
-            sys.argv = [
-                str(REPO_ROOT / "src" / "video_summary_cli.py"),
-                str(source),
-                "--out-root",
-                str(output_root),
-                "--reuse-transcript",
-            ]
-            try:
-                with mock.patch.object(canonical_cli, "extract_info", side_effect=AssertionError("source accessed")):
-                    with contextlib.redirect_stderr(stderr):
-                        with self.assertRaises(SystemExit) as raised:
-                            canonical_cli.main()
-            finally:
-                sys.argv = previous_argv
+            for transcript_path in cases:
+                with self.subTest(transcript_path=transcript_path):
+                    previous_argv = sys.argv
+                    stderr = io.StringIO()
+                    sys.argv = [
+                        str(REPO_ROOT / "src" / "video_summary_cli.py"),
+                        str(source),
+                        "--out-root",
+                        str(output_root),
+                        "--reuse-transcript",
+                        str(transcript_path),
+                    ]
+                    try:
+                        with mock.patch.object(canonical_cli, "extract_info", side_effect=AssertionError("source accessed")):
+                            with contextlib.redirect_stderr(stderr):
+                                with self.assertRaises(SystemExit) as raised:
+                                    canonical_cli.main()
+                    finally:
+                        sys.argv = previous_argv
 
-            self.assertNotEqual(raised.exception.code, 0)
-            self.assertIn("--reuse-transcript", stderr.getvalue())
-            self.assertIn("support/transcript.txt", stderr.getvalue())
-            self.assertNotIn("source accessed", stderr.getvalue())
+                    error = stderr.getvalue()
+                    self.assertNotEqual(raised.exception.code, 0)
+                    self.assertIn("ERROR: 阶段=输出准备；", error)
+                    self.assertIn("--reuse-transcript 指定的本地转写文件不存在或不可读", error)
+                    self.assertIn(transcript_path.name, error)
+                    self.assertNotIn("source accessed", error)
+                    self.assertNotIn("support/transcript", error)
+                    self.assertFalse(output_root.exists())
 
 
 if __name__ == "__main__":

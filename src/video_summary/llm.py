@@ -11,11 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .artifacts import (
-    load_existing_chunk_summaries,
-    read_segments_file,
-    write_chunk_summaries,
-)
+from .artifacts import read_segments_file
 from .config import (
     ANALYSIS_SCOPE_NOTE,
     LLM_MAX_ATTEMPTS,
@@ -24,18 +20,17 @@ from .config import (
     fail,
 )
 from .mermaid import extract_mermaid, is_valid_mindmap, remove_bare_mindmaps
-from .outputs import archive_previous_final_outputs, clear_previous_final_outputs, format_duration
+from .outputs import clear_previous_final_outputs, format_duration
 from .storage import (
     MINDMAP_FILENAME,
     SUMMARY_DRAFT_FILENAME,
     SUMMARY_FILENAME,
     internal_path,
 )
-from .sources import is_remote_source, safe_display_name
+from .sources import is_document_source, is_remote_source, safe_display_name, source_origin_label
 from .summarization import split_sentences
 from .subtitles import format_timestamp
 
-DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".odt", ".rtf"}
 TRANSCRIPT_SECTION_TERMS = (
     "\u9010\u5b57\u7a3f",
     "\u9010\u5b57\u8f6c\u5199",
@@ -46,15 +41,32 @@ TRANSCRIPT_SECTION_TERMS = (
 )
 
 
-def is_document_source(source: str) -> bool:
-    path_without_query = str(source).split("?", 1)[0]
-    return Path(path_without_query).suffix.lower() in DOCUMENT_EXTENSIONS
-
-
 def transcript_source_label(source: str, subtitle_lang: str | None) -> str:
+    return source_origin_label(source, subtitle_lang)
+
+
+def _content_label(source: str) -> str:
+    return "文档" if is_document_source(source) else "视频"
+
+
+def _content_subject(source: str) -> str:
+    return "document" if is_document_source(source) else "video"
+
+
+def _analysis_scope_zh(source: str) -> str:
     if is_document_source(source):
-        return "\u6587\u6863"
-    return subtitle_lang or "local transcription"
+        return "仅基于有文本层的 PDF 或 OOXML 文档文本，不包含音频转写、OCR、截图或画面理解。"
+    return "仅基于字幕/音频转写，不包含 OCR、截图或画面理解。"
+
+
+def _render_prompt_instructions(instructions: str, source: str) -> str:
+    replacements = {
+        "{content_label}": _content_label(source),
+        "{analysis_scope_zh}": _analysis_scope_zh(source),
+    }
+    for placeholder, value in replacements.items():
+        instructions = instructions.replace(placeholder, value)
+    return instructions
 
 
 def _prompt_source_name(source: str) -> str:
@@ -110,8 +122,24 @@ def _prepare_final_summary(summary: str, source: str) -> str:
     final_summary = _remove_transcript_sections(final_summary)
     if is_document_source(source):
         final_summary = re.sub(
+            r"(?im)^(\s*#{1,6}\s*)视频精校总结(?P<suffix>.*)$",
+            r"\g<1>文档精校总结\g<suffix>",
+            final_summary,
+        )
+        final_summary = re.sub(
+            r"(?im)^(\s*#{1,6}\s*)视频章节总结(?P<suffix>.*)$",
+            r"\g<1>文档章节总结\g<suffix>",
+            final_summary,
+        )
+        final_summary = re.sub(
             r"(?im)^\s*(?:[-*]\s*)?(?:\u6587\u7a3f\u6765\u6e90|transcript\s+source)\s*[:：].*$",
             "- \u6587\u7a3f\u6765\u6e90：\u6587\u6863",
+            final_summary,
+        )
+    elif not is_remote_source(source):
+        final_summary = re.sub(
+            r"(?im)^\s*(?:[-*]\s*)?(?:\u6587\u7a3f\u6765\u6e90|transcript\s+source)\s*[:：].*$",
+            "- \u6587\u7a3f\u6765\u6e90：\u672c\u5730\u8f6c\u5199",
             final_summary,
         )
     return final_summary.strip()
@@ -310,7 +338,8 @@ def build_lecture_chunk_prompt(
     chunk: dict[str, Any],
 ) -> str:
     display_name = _prompt_source_name(source)
-    return f"""You are summarizing one chronological chunk of a long Chinese lecture.
+    subject = _content_subject(source)
+    return f"""You are summarizing one chronological chunk of a long Chinese {subject}.
 
 Return concise Markdown only. Preserve timestamps when present. Capture:
 - main claims
@@ -319,7 +348,7 @@ Return concise Markdown only. Preserve timestamps when present. Capture:
 - action steps
 - open questions or caveats
 
-Video metadata:
+{subject.title()} metadata:
 - title: {title}
 - url: {display_name}
 - author: {author}
@@ -344,9 +373,11 @@ def build_llm_prompt(
     content_type: str,
 ) -> str:
     display_name = _prompt_source_name(source)
-    prompt_file = "lecture_prompt.md" if content_type == "lecture" else "refined_prompt.md"
+    prompt_file = "lecture_prompt.md" if content_type == "lecture" and not is_document_source(source) else "refined_prompt.md"
     prompt_path = REFERENCES_DIR / prompt_file
     instructions = prompt_path.read_text(encoding="utf-8", errors="ignore") if prompt_path.exists() else ""
+    instructions = _render_prompt_instructions(instructions, source)
+    subject = _content_subject(source)
     document_instruction = (
         "\u6700\u7ec8\u7a3f\u53ea\u4fdd\u7559\u7cbe\u4fee\u603b\u7ed3\u7ed3\u6784\uff0c\u4e0d\u5f97\u8f93\u51fa\u5b8c\u6574\u9010\u5b57\u7a3f\u3001\u5168\u6587\u8f6c\u5f55\u6216\u7b49\u4ef7 transcript\uff1b\u5b8c\u6574\u4f9d\u636e\u6750\u6599\u53ea\u4fdd\u7559\u5728 support/transcript.txt\u3002"
     )
@@ -361,7 +392,7 @@ def build_llm_prompt(
 
 Now produce the final Markdown directly. Do not wrap the whole answer in a code block.
 
-Video metadata:
+{subject.title()} metadata:
 - title: {title}
 - url: {display_name}
 - author: {author}
@@ -385,7 +416,7 @@ def call_llm(prompt: str, model: str, api_kind: str) -> str:
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a precise Chinese video-summary editor."},
+                {"role": "system", "content": "You are a precise Chinese summary editor."},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
@@ -395,7 +426,7 @@ def call_llm(prompt: str, model: str, api_kind: str) -> str:
         payload = {
             "model": model,
             "input": [
-                {"role": "system", "content": "You are a precise Chinese video-summary editor."},
+                {"role": "system", "content": "You are a precise Chinese summary editor."},
                 {"role": "user", "content": prompt},
             ],
         }
@@ -466,13 +497,14 @@ def refine_long_lecture_with_llm(
     model: str,
     api_kind: str,
     chunk_chars: int,
+    workspace_dir: Path | None = None,
 ) -> str:
-    chunks = split_transcript_for_llm(out_dir, transcript, chunk_chars)
-    chunk_summaries = load_existing_chunk_summaries(out_dir)
-    completed_indexes = {int(item["index"]) for item in chunk_summaries if isinstance(item.get("index"), int)}
+    workspace_dir = workspace_dir or out_dir
+    chunks = split_transcript_for_llm(workspace_dir, transcript, chunk_chars)
+    # Chunk summaries are only useful to assemble this single request. Keeping
+    # them in memory avoids presenting a non-functional cross-run cache.
+    chunk_summaries: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks, 1):
-        if index in completed_indexes:
-            continue
         chunk_prompt = build_lecture_chunk_prompt(
             title=title,
             source=source,
@@ -489,9 +521,7 @@ def refine_long_lecture_with_llm(
             "end": chunk.get("end"),
             "summary": call_llm(chunk_prompt, model=model, api_kind=api_kind).strip(),
         })
-        write_chunk_summaries(out_dir, chunk_summaries)
-    chunk_summaries = sorted(chunk_summaries, key=lambda item: int(item.get("index", 0)))
-    write_chunk_summaries(out_dir, chunk_summaries)
+    chunk_summaries.sort(key=lambda item: int(item.get("index", 0)))
     merged_transcript = "\n\n".join(
         f"## 分段 {item['index']} [{format_timestamp(item.get('start'))} - {format_timestamp(item.get('end'))}]\n{item['summary']}"
         for item in chunk_summaries
@@ -508,10 +538,11 @@ def refine_long_lecture_with_llm(
     )
     return call_llm(prompt, model=model, api_kind=api_kind)
 
-def _stage_bytes_file(out_dir: Path, filename: str, content: bytes) -> Path:
+def _stage_bytes_file(workspace_dir: Path, filename: str, content: bytes) -> Path:
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="wb",
-        dir=out_dir,
+        dir=workspace_dir,
         prefix=f".{filename}.",
         suffix=".tmp",
         delete=False,
@@ -522,11 +553,17 @@ def _stage_bytes_file(out_dir: Path, filename: str, content: bytes) -> Path:
         return Path(handle.name)
 
 
-def _stage_text_file(out_dir: Path, filename: str, content: str) -> Path:
-    return _stage_bytes_file(out_dir, filename, content.encode("utf-8"))
+def _stage_text_file(workspace_dir: Path, filename: str, content: str) -> Path:
+    return _stage_bytes_file(workspace_dir, filename, content.encode("utf-8"))
 
 
-def _publish_final_outputs(out_dir: Path, summary: str, mindmap: str | None = None) -> None:
+def _publish_final_outputs(
+    out_dir: Path,
+    summary: str,
+    mindmap: str | None = None,
+    workspace_dir: Path | None = None,
+) -> None:
+    workspace_dir = workspace_dir or out_dir
     summary_path = out_dir / SUMMARY_FILENAME
     mindmap_path = out_dir / MINDMAP_FILENAME
     targets: list[tuple[Path, bytes | None]] = [
@@ -545,10 +582,10 @@ def _publish_final_outputs(out_dir: Path, summary: str, mindmap: str | None = No
     try:
         for target, content in targets:
             if content is not None:
-                staged[target] = _stage_bytes_file(out_dir, target.name, content)
+                staged[target] = _stage_bytes_file(workspace_dir, target.name, content)
         for target, _ in targets:
             if target.is_file():
-                backups[target] = _stage_bytes_file(out_dir, target.name, target.read_bytes())
+                backups[target] = _stage_bytes_file(workspace_dir, target.name, target.read_bytes())
         for target, _ in targets:
             backup = backups.get(target)
             if backup is not None:
@@ -581,20 +618,25 @@ def refine_with_llm(
     api_kind: str,
     max_chars: int,
     content_type: str,
+    workspace_dir: Path | None = None,
 ) -> str | None:
+    workspace_dir = workspace_dir or out_dir
     if (out_dir / SUMMARY_FILENAME).is_file() or (out_dir / MINDMAP_FILENAME).is_file():
         # A failed quality gate must not leave a previous final looking like
-        # the result of the current refinement attempt.
-        archive_previous_final_outputs(out_dir)
+        # the result of the current refinement attempt. The old finals are
+        # known tool outputs, so removing them is safe and does not touch any
+        # other user file.
+        (out_dir / SUMMARY_FILENAME).unlink(missing_ok=True)
+        (out_dir / MINDMAP_FILENAME).unlink(missing_ok=True)
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         fail("启用 --llm-refine 需要设置 OPENAI_API_KEY。--use-codex-config 只读取模型和 base URL，不读取 Codex 登录凭据。")
 
-    title = str(info.get("title") or "未命名视频")
+    title = str(info.get("title") or ("未命名文档" if is_document_source(source) else "未命名视频"))
     author = str(info.get("uploader") or info.get("channel") or "未知")
     duration = format_duration(info.get("duration"))
-    draft_summary_path = internal_path(out_dir, SUMMARY_DRAFT_FILENAME)
+    draft_summary_path = internal_path(workspace_dir, SUMMARY_DRAFT_FILENAME)
     draft_summary = draft_summary_path.read_text(encoding="utf-8", errors="ignore") if draft_summary_path.exists() else ""
     if content_type == "lecture" and should_chunk_lecture(transcript, max_chars):
         refined = refine_long_lecture_with_llm(
@@ -602,7 +644,7 @@ def refine_with_llm(
             source=source,
             author=author,
             duration=duration,
-            out_dir=out_dir,
+            out_dir=workspace_dir,
             transcript=transcript,
             subtitle_lang=subtitle_lang,
             draft_summary=draft_summary,
@@ -635,6 +677,7 @@ def refine_with_llm(
         out_dir,
         final_summary + "\n",
         final_mindmap + "\n" if final_mindmap else None,
+        workspace_dir=workspace_dir,
     )
     try:
         clear_previous_final_outputs(out_dir)

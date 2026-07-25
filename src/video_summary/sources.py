@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DOCUMENT_EXTENSIONS, fail
-from .storage import AUDIO_FILENAME, internal_path
+from .storage import AUDIO_FILENAME, ensure_internal_dir, internal_path
 
 def slug_from_info(info: dict[str, Any], source: str) -> str:
     local_path = info.get("_local_path")
@@ -29,6 +29,16 @@ def safe_filename(value: str) -> str:
 
 def is_remote_source(source: str) -> bool:
     return urlparse(str(source)).scheme in {"http", "https"}
+
+def is_document_source(source: str) -> bool:
+    path_without_query = str(source).split("?", 1)[0]
+    return Path(path_without_query).suffix.lower() in DOCUMENT_EXTENSIONS
+
+
+def source_origin_label(source: str, subtitle_lang: str | None) -> str:
+    if is_document_source(source):
+        return "文档"
+    return subtitle_lang or "本地转写"
 
 def is_url_source(source: str) -> bool:
     """Return whether source uses a URL scheme rather than a local path."""
@@ -128,6 +138,7 @@ def extract_info(source: str, cookies_from_browser: str | None) -> dict[str, Any
         return ydl.extract_info(source, download=False)
 
 def download_audio(source: str, out_dir: Path, cookies_from_browser: str | None) -> Path:
+    ensure_internal_dir(out_dir)
     local_path = local_source_path(source)
     if local_path:
         return local_path

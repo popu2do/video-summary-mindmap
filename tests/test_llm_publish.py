@@ -11,7 +11,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from video_summary import llm, outputs
+from video_summary import config, llm, outputs
 
 
 class FinalDeliveryTests(unittest.TestCase):
@@ -62,172 +62,91 @@ class FinalDeliveryTests(unittest.TestCase):
             self.assertEqual((out_dir / "summary.md").read_text(encoding="utf-8"), refined + "\n")
             self.assertFalse((out_dir / "mindmap.mmd").exists())
 
-    def test_new_draft_run_archives_existing_final_files(self) -> None:
+    def test_new_draft_run_preserves_existing_delivery_and_stages_new_draft_elsewhere(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            out_dir = Path(temp_dir)
-            summary_path = out_dir / "summary.md"
-            mindmap_path = out_dir / "mindmap.mmd"
-            legacy_summary_path = out_dir / "summary_refined.md"
-            legacy_mindmap_path = out_dir / "mindmap_refined.mmd"
-            summary_path.write_text("旧摘要\n", encoding="utf-8")
-            mindmap_path.write_text("旧脑图\n", encoding="utf-8")
-            legacy_summary_path.write_text("旧兼容摘要\n", encoding="utf-8")
-            legacy_mindmap_path.write_text("旧兼容脑图\n", encoding="utf-8")
-
+            root = Path(temp_dir)
+            out_dir = root / "output"
+            run_dir = root / "run"
+            out_dir.mkdir()
+            (out_dir / "summary.md").write_text("旧摘要\n", encoding="utf-8")
+            (out_dir / "mindmap.mmd").write_text("旧脑图\n", encoding="utf-8")
+            (out_dir / "notes.txt").write_text("用户文件\n", encoding="utf-8")
+            (out_dir / "summary_refined.md").write_text("旧兼容摘要\n", encoding="utf-8")
             outputs.prepare_output_directory(out_dir)
-            outputs.write_outputs(
-                {"title": "测试视频", "uploader": "作者", "duration": 90},
-                "https://example.test/video",
-                out_dir,
-                "本次运行的逐字稿内容足够长，用于生成新的摘要草稿。",
-                "zh",
-                "compact",
-            )
+            outputs.write_outputs({"title": "测试视频", "uploader": "作者", "duration": 90}, "https://example.test/video", run_dir, "本次运行的逐字稿内容足够长，用于生成新的摘要草稿。", "zh", "compact")
+            self.assertEqual((out_dir / "summary.md").read_text(encoding="utf-8"), "旧摘要\n")
+            self.assertEqual((out_dir / "mindmap.mmd").read_text(encoding="utf-8"), "旧脑图\n")
+            self.assertEqual((out_dir / "notes.txt").read_text(encoding="utf-8"), "用户文件\n")
+            self.assertFalse((out_dir / "summary_refined.md").exists())
+            self.assertTrue((run_dir / "_internal" / "summary_draft.md").is_file())
+            self.assertFalse((out_dir / "_internal").exists())
 
-            archive = out_dir / "_internal" / "previous_final"
-            self.assertFalse(summary_path.exists())
-            self.assertFalse(mindmap_path.exists())
-            self.assertEqual((archive / "summary.md").read_text(encoding="utf-8"), "旧摘要\n")
-            self.assertEqual((archive / "mindmap.mmd").read_text(encoding="utf-8"), "旧脑图\n")
-            self.assertEqual((archive / "summary_refined.md").read_text(encoding="utf-8"), "旧兼容摘要\n")
-            self.assertEqual((archive / "mindmap_refined.mmd").read_text(encoding="utf-8"), "旧兼容脑图\n")
-
-    def test_prepare_moves_legacy_root_subtitles_under_internal(self) -> None:
+    def test_prepare_removes_legacy_root_subtitles_without_moving_them_to_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             out_dir = Path(temp_dir)
-            legacy_vtt = out_dir / "subtitle.zh-Hans.vtt"
-            legacy_srt = out_dir / "subtitle.en.srt"
-            legacy_vtt.write_text("WEBVTT\n\n旧中文字幕\n", encoding="utf-8")
-            legacy_srt.write_text("旧英文字幕\n", encoding="utf-8")
-
+            (out_dir / "subtitle.zh-Hans.vtt").write_text("WEBVTT\n", encoding="utf-8")
+            (out_dir / "subtitle.en.srt").write_text("旧英文字幕\n", encoding="utf-8")
+            (out_dir / "notes.txt").write_text("用户文件\n", encoding="utf-8")
             outputs.prepare_output_directory(out_dir)
+            self.assertFalse((out_dir / "subtitle.zh-Hans.vtt").exists())
+            self.assertFalse((out_dir / "subtitle.en.srt").exists())
+            self.assertFalse((out_dir / "_internal").exists())
+            self.assertTrue((out_dir / "notes.txt").exists())
 
-            self.assertFalse(legacy_vtt.exists())
-            self.assertFalse(legacy_srt.exists())
-            self.assertEqual(
-                (out_dir / "_internal" / "subtitle.zh-Hans.vtt").read_text(encoding="utf-8"),
-                "WEBVTT\n\n旧中文字幕\n",
-            )
-            self.assertEqual(
-                (out_dir / "_internal" / "subtitle.en.srt").read_text(encoding="utf-8"),
-                "旧英文字幕\n",
-            )
-
-    def test_prepare_failure_keeps_legacy_refined_files_out_of_root(self) -> None:
+    def test_prepare_removes_legacy_refined_files_without_creating_an_archive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             out_dir = Path(temp_dir)
-            legacy_summary_path = out_dir / "summary_refined.md"
-            legacy_mindmap_path = out_dir / "mindmap_refined.mmd"
-            legacy_summary_path.write_text("旧兼容摘要\n", encoding="utf-8")
-            legacy_mindmap_path.write_text("旧兼容脑图\n", encoding="utf-8")
-            failing_cache = mock.Mock()
-            failing_cache.unlink.side_effect = OSError("模拟输出准备失败")
-
-            with mock.patch.object(outputs, "internal_path", return_value=failing_cache):
-                with self.assertRaises(OSError):
-                    outputs.prepare_output_directory(out_dir)
-
-            archive = out_dir / "_internal" / "previous_final"
-            self.assertFalse(legacy_summary_path.exists())
-            self.assertFalse(legacy_mindmap_path.exists())
-            self.assertEqual((archive / "summary_refined.md").read_text(encoding="utf-8"), "旧兼容摘要\n")
-            self.assertEqual((archive / "mindmap_refined.mmd").read_text(encoding="utf-8"), "旧兼容脑图\n")
-
-    def test_llm_failure_leaves_no_stale_root_final_and_keeps_archive(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            out_dir = Path(temp_dir)
-            summary_path = out_dir / "summary.md"
-            mindmap_path = out_dir / "mindmap.mmd"
-            summary_path.write_text("旧摘要\n", encoding="utf-8")
-            mindmap_path.write_text("旧脑图\n", encoding="utf-8")
+            (out_dir / "summary_refined.md").write_text("旧兼容摘要\n", encoding="utf-8")
+            (out_dir / "mindmap_refined.mmd").write_text("旧兼容脑图\n", encoding="utf-8")
             outputs.prepare_output_directory(out_dir)
-            outputs.write_outputs(
-                {"title": "测试视频", "uploader": "作者", "duration": 90},
-                "https://example.test/video",
-                out_dir,
-                "本次运行的逐字稿内容足够长，用于生成新的摘要草稿。",
-                "zh",
-                "compact",
-            )
-
-            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
-                llm, "call_llm", side_effect=RuntimeError("LLM 请求失败")
-            ):
-                with self.assertRaises(Exception):
-                    llm.refine_with_llm(
-                        {"title": "测试视频", "uploader": "作者", "duration": 90},
-                        "https://example.test/video",
-                        out_dir,
-                        "本次运行的逐字稿内容足够长。",
-                        "zh",
-                        "gpt-test",
-                        "responses",
-                        12000,
-                        "video",
-                    )
-
-            archive = out_dir / "_internal" / "previous_final"
-            self.assertFalse(summary_path.exists())
-            self.assertFalse(mindmap_path.exists())
-            self.assertEqual((archive / "summary.md").read_text(encoding="utf-8"), "旧摘要\n")
-            self.assertEqual((archive / "mindmap.mmd").read_text(encoding="utf-8"), "旧脑图\n")
-
-    def test_successful_refinement_cleans_legacy_archive_after_prepare(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            out_dir = Path(temp_dir)
-            legacy_summary_path = out_dir / "summary_refined.md"
-            legacy_mindmap_path = out_dir / "mindmap_refined.mmd"
-            legacy_summary_path.write_text("旧兼容摘要\n", encoding="utf-8")
-            legacy_mindmap_path.write_text("旧兼容脑图\n", encoding="utf-8")
-            outputs.prepare_output_directory(out_dir)
-            (out_dir / "_internal" / "summary_draft.md").write_text("新草稿", encoding="utf-8")
-            refined = "# 精校摘要\n\n这是经过整理的实质正文。\n\n```mermaid\nmindmap\n  root((主题))\n```"
-
-            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
-                llm, "call_llm", return_value=refined
-            ):
-                llm.refine_with_llm(
-                    {"title": "测试视频", "uploader": "作者", "duration": 90},
-                    "https://example.test/video",
-                    out_dir,
-                    "本次运行的逐字稿内容足够长。",
-                    "zh",
-                    "gpt-test",
-                    "responses",
-                    12000,
-                    "video",
-                )
-
-            self.assertFalse(legacy_summary_path.exists())
-            self.assertFalse(legacy_mindmap_path.exists())
+            self.assertFalse((out_dir / "summary_refined.md").exists())
+            self.assertFalse((out_dir / "mindmap_refined.mmd").exists())
             self.assertFalse((out_dir / "_internal" / "previous_final").exists())
-            self.assertTrue((out_dir / "summary.md").is_file())
-            self.assertTrue((out_dir / "mindmap.mmd").is_file())
 
-    def test_refine_with_llm_does_not_archive_after_canonical_prepare(self) -> None:
+    def test_llm_failure_hides_existing_delivery_without_archiving_it(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            out_dir = Path(temp_dir)
+            root = Path(temp_dir)
+            out_dir = root / "output"
+            run_dir = root / "run"
+            out_dir.mkdir()
+            (out_dir / "summary.md").write_text("旧摘要\n", encoding="utf-8")
+            (out_dir / "mindmap.mmd").write_text("旧脑图\n", encoding="utf-8")
+            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(llm, "call_llm", side_effect=RuntimeError("LLM 请求失败")):
+                with self.assertRaises(Exception):
+                    llm.refine_with_llm({"title": "测试视频", "uploader": "作者", "duration": 90}, "https://example.test/video", out_dir, "本次运行的逐字稿内容足够长。", "zh", "gpt-test", "responses", 12000, "video", workspace_dir=run_dir)
+            self.assertFalse((out_dir / "summary.md").exists())
+            self.assertFalse((out_dir / "mindmap.mmd").exists())
+            self.assertFalse((out_dir / "_internal" / "previous_final").exists())
+
+    def test_successful_refinement_publishes_only_final_files_after_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            out_dir = root / "output"
+            run_dir = root / "run"
+            out_dir.mkdir()
+            (out_dir / "summary_refined.md").write_text("旧兼容摘要\n", encoding="utf-8")
+            (out_dir / "mindmap_refined.mmd").write_text("旧兼容脑图\n", encoding="utf-8")
             outputs.prepare_output_directory(out_dir)
-            (out_dir / "_internal" / "summary_draft.md").write_text("新草稿", encoding="utf-8")
+            outputs.write_outputs({"title": "测试视频", "uploader": "作者", "duration": 90}, "https://example.test/video", run_dir, "本次运行的逐字稿内容足够长。", "zh", "compact")
+            refined = "# 精校摘要\n\n这是经过整理的实质正文。\n\n```mermaid\nmindmap\n  root((主题))\n```"
+            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(llm, "call_llm", return_value=refined):
+                llm.refine_with_llm({"title": "测试视频", "uploader": "作者", "duration": 90}, "https://example.test/video", out_dir, "本次运行的逐字稿内容足够长。", "zh", "gpt-test", "responses", 12000, "video", workspace_dir=run_dir)
+            self.assertEqual({path.name for path in out_dir.iterdir()}, {"summary.md", "mindmap.mmd"})
+            self.assertFalse((out_dir / "_internal").exists())
+
+    def test_refine_with_llm_publishes_from_run_workspace_without_archive_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            out_dir = root / "output"
+            run_dir = root / "run"
+            out_dir.mkdir()
+            outputs.write_outputs({"title": "测试视频", "uploader": "作者", "duration": 90}, "https://example.test/video", run_dir, "本次运行的逐字稿内容足够长。", "zh", "compact")
             refined = "# 精校摘要\n\n这是经过整理的实质正文。\n"
-
-            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
-                llm, "call_llm", return_value=refined
-            ), mock.patch.object(llm, "archive_previous_final_outputs") as archive:
-                llm.refine_with_llm(
-                    {"title": "测试视频", "uploader": "作者", "duration": 90},
-                    "https://example.test/video",
-                    out_dir,
-                    "本次运行的逐字稿内容足够长，用于验证精校不重复归档。",
-                    "zh",
-                    "gpt-test",
-                    "responses",
-                    12000,
-                    "video",
-                )
-
-            archive.assert_not_called()
+            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(llm, "call_llm", return_value=refined):
+                llm.refine_with_llm({"title": "测试视频", "uploader": "作者", "duration": 90}, "https://example.test/video", out_dir, "本次运行的逐字稿内容足够长。", "zh", "gpt-test", "responses", 12000, "video", workspace_dir=run_dir)
             self.assertEqual((out_dir / "summary.md").read_text(encoding="utf-8"), refined)
+            self.assertFalse((out_dir / "_internal").exists())
+            self.assertFalse((out_dir / "_internal" / "previous_final").exists())
 
     def test_llm_success_clears_previous_final_archive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -383,6 +302,39 @@ class FinalDeliveryTests(unittest.TestCase):
         self.assertIn("来源：课程第一讲.mp4", published)
         self.assertNotIn(str(Path(source).parent), published)
         self.assertNotIn(source, published)
+
+    def test_local_video_final_summary_uses_chinese_transcription_label(self) -> None:
+        source = r"C:\private\视频\课程第一讲.mp4"
+        refined = (
+            "# 视频精校总结\n\n"
+            "## 元信息\n"
+            "- 来源：课程第一讲.mp4\n"
+            "- 文稿来源：local transcription\n\n"
+            "## 摘要\n"
+            "这是保留的高质量精修摘要。"
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
+                llm, "call_llm", return_value=refined
+            ):
+                llm.refine_with_llm(
+                    {"title": "课程第一讲", "uploader": "本地文件", "duration": None},
+                    source,
+                    out_dir,
+                    "本地音频转写内容足够长，用于验证最终稿元信息标签。",
+                    None,
+                    "gpt-test",
+                    "responses",
+                    12000,
+                    "video",
+                )
+
+            published = (out_dir / "summary.md").read_text(encoding="utf-8")
+
+        self.assertIn("- 文稿来源：本地转写", published)
+        self.assertNotIn("local transcription", published)
 
     def test_remote_url_remains_unchanged_in_prompt_and_published_summary(self) -> None:
         source = "https://example.test/video?id=123"
@@ -705,36 +657,21 @@ mindmap
             "mindmap\n  root((测试主题))\n    章节一"
         )
 
-    def test_quality_failure_archives_stale_root_final_files(self) -> None:
-        transcript = "这是本次运行的原始逐字稿，内容足够长，用于验证质量失败时旧最终稿不会留在根层。"
+    def test_quality_failure_hides_stale_root_final_files_without_archive(self) -> None:
+        transcript = "这是本次运行的原始逐字稿，内容足够长，用于验证质量失败时旧最终稿仍然可见。"
         with tempfile.TemporaryDirectory() as temp_dir:
-            out_dir = Path(temp_dir)
-            summary_path = out_dir / "summary.md"
-            mindmap_path = out_dir / "mindmap.mmd"
-            summary_path.write_text("旧最终摘要\n", encoding="utf-8")
-            mindmap_path.write_text("旧脑图\n", encoding="utf-8")
-
-            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
-                llm, "call_llm", return_value="# 摘要\n\n抱歉，我无法完成这个请求。"
-            ):
-                with self.assertRaises(SystemExit):
-                    llm.refine_with_llm(
-                        {"title": "测试视频", "uploader": "作者", "duration": 90},
-                        "https://example.test/video",
-                        out_dir,
-                        transcript,
-                        "zh",
-                        "gpt-test",
-                        "responses",
-                        12000,
-                        "video",
-                    )
-
-            archive = out_dir / "_internal" / "previous_final"
-            self.assertFalse(summary_path.exists())
-            self.assertFalse(mindmap_path.exists())
-            self.assertEqual((archive / "summary.md").read_text(encoding="utf-8"), "旧最终摘要\n")
-            self.assertEqual((archive / "mindmap.mmd").read_text(encoding="utf-8"), "旧脑图\n")
+            root = Path(temp_dir)
+            out_dir = root / "output"
+            run_dir = root / "run"
+            out_dir.mkdir()
+            (out_dir / "summary.md").write_text("旧最终摘要\n", encoding="utf-8")
+            (out_dir / "mindmap.mmd").write_text("旧脑图\n", encoding="utf-8")
+            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(llm, "call_llm", return_value="# 摘要\n\n抱歉，我无法完成这个请求。"):
+                with self.assertRaises(config.UserFacingError):
+                    llm.refine_with_llm({"title": "测试视频", "uploader": "作者", "duration": 90}, "https://example.test/video", out_dir, transcript, "zh", "gpt-test", "responses", 12000, "video", workspace_dir=run_dir)
+            self.assertFalse((out_dir / "summary.md").exists())
+            self.assertFalse((out_dir / "mindmap.mmd").exists())
+            self.assertFalse((out_dir / "_internal" / "previous_final").exists())
 
     def test_reference_prompts_forbid_full_transcript_in_final_output(self) -> None:
         references = Path(llm.REFERENCES_DIR)
@@ -769,7 +706,7 @@ mindmap
                         "video",
                     )
                 except BaseException as error:
-                    self.assertIsInstance(error, SystemExit)
+                    self.assertIsInstance(error, config.UserFacingError)
                     self.assertNotEqual(getattr(error, "code", 0), 0)
                     self.assertIn("LLM 返回", getattr(error, "message", str(error)))
                 else:

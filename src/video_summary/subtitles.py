@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import PREFERRED_LANGS, TEXT_EXTENSIONS, fail
-from .storage import internal_path
+from .storage import ensure_internal_dir, internal_path
 from .transcript import coerce_seconds, normalize_segment_text, normalize_segments, normalize_text
 
 def choose_subtitle(info: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
@@ -31,6 +31,7 @@ def best_subtitle_format(entries: list[dict[str, Any]]) -> dict[str, Any]:
     return sorted(entries, key=score)[0]
 
 def fetch_subtitle(entry: dict[str, Any], out_dir: Path, lang: str) -> Path:
+    ensure_internal_dir(out_dir)
     url = entry.get("url")
     if not url:
         fail("字幕条目没有 URL。")
