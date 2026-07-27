@@ -364,6 +364,39 @@ class VideoSummaryTests(unittest.TestCase):
         self.assertIn("no audio transcription, OCR", document_prompt)
         self.assertNotIn("including optional PDF OCR", document_prompt)
 
+    def test_call_llm_sets_provider_compatible_user_agent(self) -> None:
+        response = FakeResponse({"choices": [{"message": {"content": "成功"}}]})
+        requests = []
+
+        def capture(request, **kwargs):
+            requests.append(request)
+            return response
+
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=True), \
+                mock.patch.object(self.module.urllib.request, "urlopen", side_effect=capture):
+            result = self.module.call_llm("prompt", "model", "chat")
+
+        self.assertEqual(result, "成功")
+        self.assertEqual(requests[0].get_header("User-agent"), "video-summary-mindmap/1.0")
+
+    def test_call_llm_writes_prompt_and_response_trace_when_requested(self) -> None:
+        response = FakeResponse({"choices": [{"message": {"content": "精校结果"}}]})
+        with tempfile.TemporaryDirectory(prefix="video-summary-llm-trace-") as temp_dir:
+            trace_dir = Path(temp_dir) / "llm"
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "trace-key"}, clear=True), \
+                    mock.patch.object(self.module.urllib.request, "urlopen", return_value=response):
+                result = self.module.call_llm("诊断提示词", "model", "chat", trace_dir=trace_dir)
+
+            self.assertEqual(result, "精校结果")
+            prompt_files = sorted(trace_dir.glob("prompt_*.md"))
+            response_files = sorted(trace_dir.glob("response_*.md"))
+            self.assertEqual(len(prompt_files), 1)
+            self.assertEqual(len(response_files), 1)
+            self.assertEqual(prompt_files[0].read_text(encoding="utf-8"), "诊断提示词")
+            self.assertEqual(response_files[0].read_text(encoding="utf-8"), "精校结果")
+            self.assertNotIn("trace-key", prompt_files[0].read_text(encoding="utf-8"))
+            self.assertNotIn("trace-key", response_files[0].read_text(encoding="utf-8"))
+
     def test_call_llm_retries_429_then_succeeds(self) -> None:
         response = FakeResponse({"choices": [{"message": {"content": "成功"}}]})
         error = self.http_error(429, "rate limit")

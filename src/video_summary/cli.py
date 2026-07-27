@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +124,44 @@ def _remove_empty_output(out_dir: Path) -> None:
         return
 
 
+def _preserve_debug_snapshot(
+    run_workspace: RunWorkspace,
+    out_dir: Path,
+    source: str,
+    source_id: str,
+    args: argparse.Namespace,
+) -> Path:
+    run_id = uuid.uuid4().hex[:12]
+    debug_dir = out_dir / "_debug" / run_id
+    run_workspace.preserve_to(debug_dir)
+    manifest = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "source": source,
+        "source_id": source_id,
+        "command": sys.argv[1:],
+        "keep_intermediates": True,
+        "template": args.template,
+        "content_type": args.content_type,
+        "language": args.language,
+        "domain": args.domain,
+        "force_transcribe": args.force_transcribe,
+        "reuse_transcript": args.reuse_transcript,
+        "local_whisper_model": args.local_whisper_model,
+        "llm_refine": args.llm_refine,
+        "llm_model": args.llm_model,
+        "llm_api": args.llm_api,
+        "llm_max_chars": args.llm_max_chars,
+        "out_root": str(Path(args.out_root).expanduser().resolve()),
+        "llm_base_url": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    }
+    (debug_dir / "run_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return debug_dir
+
+
 def _final_failure_reason(out_dir: Path, reason: str) -> str:
     if (out_dir / SUMMARY_FILENAME).is_file():
         suffix = f"当前输出目录仅保留已有最终稿：{SUMMARY_FILENAME}"
@@ -144,7 +184,8 @@ def main() -> None:
             "本次运行的转写、草稿和内部状态只写入临时工作区，运行结束自动清理。\n"
             "实际输出目录为 PATH/<source-id>/，其中只有根目录 summary.md（及可选 mindmap.mmd）是最终交付。\n"
             "仅支持有文本层的 PDF；图像型 PDF 不支持。\n"
-            "refined 是内部草稿模板，不是最终稿。"
+            "refined 是内部草稿模板，不是最终稿。\n"
+            "调试定位时可显式使用 --keep-intermediates，保留到 output/<source-id>/_debug/<run-id>/；默认仍清理。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -189,6 +230,11 @@ def main() -> None:
     parser.add_argument("--llm-api", choices=("responses", "chat"), default=os.environ.get("OPENAI_API_KIND", "responses"), help="LLM API 类型：responses 或 chat")
     parser.add_argument("--llm-max-chars", type=int, default=60000, help="发送给 LLM 的逐字稿最大字符数")
     parser.add_argument("--use-codex-config", action="store_true", help="读取 ~/.codex/config.toml 的模型、wire_api 和 base_url 作为 LLM 精校配置")
+    parser.add_argument(
+        "--keep-intermediates",
+        action="store_true",
+        help="调试开关：将本次运行的转写、分段、离线草稿、音频/字幕和 LLM prompt/response 保留到 output/<source-id>/_debug/<run-id>/；默认清理",
+    )
     raw_argv = sys.argv[1:]
     if "--force-transcribe" in raw_argv and any(
         value == "--reuse-transcript" or value.startswith("--reuse-transcript=")
@@ -204,6 +250,8 @@ def main() -> None:
 
     out_dir: Path | None = None
     run_workspace: RunWorkspace | None = None
+    source = args.source
+    video_id = "unknown"
     try:
         args.llm_model_explicit = "--llm-model" in sys.argv
         args.llm_api_explicit = "--llm-api" in sys.argv
@@ -379,4 +427,16 @@ def main() -> None:
         _report_failure("未处理", _exception_reason(error))
     finally:
         if run_workspace is not None:
+            if getattr(args, "keep_intermediates", False) and out_dir is not None:
+                try:
+                    debug_snapshot_dir = _preserve_debug_snapshot(
+                        run_workspace,
+                        out_dir,
+                        source,
+                        video_id,
+                        args,
+                    )
+                    print(f"调试中间态：{debug_snapshot_dir}")
+                except Exception as error:
+                    print(f"警告：调试中间态保留失败：{_exception_reason(error)}", file=sys.stderr)
             run_workspace.cleanup()

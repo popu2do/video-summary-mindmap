@@ -403,6 +403,39 @@ class CanonicalCliContractTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, transcription_source)
 
+    def test_canonical_cli_help_exposes_intermediate_debug_switch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-help-intermediates-") as temp_dir:
+            result = run_canonical_cli("--help", cwd=Path(temp_dir))
+
+        assert_cli_succeeded(self, result)
+        self.assertIn("--keep-intermediates", result.stdout)
+        self.assertIn("_debug/<run-id>", result.stdout)
+
+    def test_keep_intermediates_preserves_debug_snapshot_without_mixing_delivery_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="video-summary-keep-intermediates-") as temp_dir:
+            workspace = Path(temp_dir)
+            result = run_canonical_cli(
+                str(SOURCE_FIXTURE),
+                "--keep-intermediates",
+                cwd=workspace,
+                env={"OPENAI_API_KEY": "must-not-be-written"},
+            )
+
+            assert_cli_succeeded(self, result)
+            output_dir = workspace / "output" / SOURCE_ID
+            debug_runs = list((output_dir / "_debug").iterdir())
+            self.assertEqual(len(debug_runs), 1)
+            debug_dir = debug_runs[0]
+            self.assertTrue((debug_dir / "run_manifest.json").is_file())
+            self.assertTrue((debug_dir / "support" / "transcript.txt").is_file())
+            self.assertTrue((debug_dir / "_internal" / "summary_draft.md").is_file())
+            manifest = json.loads((debug_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertTrue(manifest["keep_intermediates"])
+            self.assertEqual(manifest["source_id"], SOURCE_ID)
+            self.assertNotIn("must-not-be-written", json.dumps(manifest, ensure_ascii=False))
+            self.assertFalse((output_dir / "summary.md").exists())
+            self.assertIn("调试中间态：", result.stdout)
+
     def test_canonical_cli_help_describes_supported_sources_and_output_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="video-summary-help-") as temp_dir:
             result = run_canonical_cli("--help", cwd=Path(temp_dir))

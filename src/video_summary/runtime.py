@@ -21,6 +21,16 @@ class RunWorkspace:
             Path(tempfile.mkdtemp(prefix=".video-summary-", dir=workspace_parent))
         )
 
+    def preserve_to(self, destination: Path) -> None:
+        """Copy this run's private files to an explicit diagnostic destination."""
+        if self._cleaned:
+            raise RuntimeError("运行工作区已清理，无法保留中间态。")
+        destination = destination.expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise FileExistsError(f"调试快照目标已存在：{destination}")
+        shutil.copytree(self.path, destination)
+
     def cleanup(self) -> None:
         if self._cleaned:
             return

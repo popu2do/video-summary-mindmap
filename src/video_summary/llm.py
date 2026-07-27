@@ -408,7 +408,21 @@ Transcript:
 {transcript}
 """
 
-def call_llm(prompt: str, model: str, api_kind: str) -> str:
+def _write_llm_trace(trace_dir: Path | None, prompt: str, response: str) -> None:
+    if trace_dir is None:
+        return
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    sequence = len(list(trace_dir.glob("prompt_*.md"))) + 1
+    (trace_dir / f"prompt_{sequence:03d}.md").write_text(prompt, encoding="utf-8")
+    (trace_dir / f"response_{sequence:03d}.md").write_text(response, encoding="utf-8")
+
+
+def call_llm(
+    prompt: str,
+    model: str,
+    api_kind: str,
+    trace_dir: Path | None = None,
+) -> str:
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     api_key = os.environ["OPENAI_API_KEY"]
     if api_kind == "chat":
@@ -438,6 +452,7 @@ def call_llm(prompt: str, model: str, api_kind: str) -> str:
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "video-summary-mindmap/1.0",
             },
             method="POST",
         )
@@ -455,7 +470,21 @@ def call_llm(prompt: str, model: str, api_kind: str) -> str:
             if attempt >= LLM_MAX_ATTEMPTS:
                 fail(f"LLM 精校请求失败：{last_error}")
         time.sleep(LLM_RETRY_DELAYS[attempt - 1])
-    return parse_llm_text(data, api_kind)
+    result = parse_llm_text(data, api_kind)
+    _write_llm_trace(trace_dir, prompt, result)
+    return result
+
+def _call_and_trace(
+    prompt: str,
+    model: str,
+    api_kind: str,
+    trace_dir: Path | None,
+) -> str:
+    result = call_llm(prompt, model=model, api_kind=api_kind)
+    if isinstance(result, str):
+        _write_llm_trace(trace_dir, prompt, result)
+    return result
+
 
 def is_retryable_http_status(status: int) -> bool:
     return status == 429 or 500 <= status <= 599
@@ -498,6 +527,7 @@ def refine_long_lecture_with_llm(
     api_kind: str,
     chunk_chars: int,
     workspace_dir: Path | None = None,
+    trace_dir: Path | None = None,
 ) -> str:
     workspace_dir = workspace_dir or out_dir
     chunks = split_transcript_for_llm(workspace_dir, transcript, chunk_chars)
@@ -519,7 +549,12 @@ def refine_long_lecture_with_llm(
             "index": index,
             "start": chunk.get("start"),
             "end": chunk.get("end"),
-            "summary": call_llm(chunk_prompt, model=model, api_kind=api_kind).strip(),
+            "summary": _call_and_trace(
+                chunk_prompt,
+                model=model,
+                api_kind=api_kind,
+                trace_dir=trace_dir,
+            ).strip(),
         })
     chunk_summaries.sort(key=lambda item: int(item.get("index", 0)))
     merged_transcript = "\n\n".join(
@@ -536,7 +571,7 @@ def refine_long_lecture_with_llm(
         draft_summary=draft_summary,
         content_type="lecture",
     )
-    return call_llm(prompt, model=model, api_kind=api_kind)
+    return _call_and_trace(prompt, model=model, api_kind=api_kind, trace_dir=trace_dir)
 
 def _stage_bytes_file(workspace_dir: Path, filename: str, content: bytes) -> Path:
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -621,6 +656,7 @@ def refine_with_llm(
     workspace_dir: Path | None = None,
 ) -> str | None:
     workspace_dir = workspace_dir or out_dir
+    trace_dir = workspace_dir / "llm"
     if (out_dir / SUMMARY_FILENAME).is_file() or (out_dir / MINDMAP_FILENAME).is_file():
         # A failed quality gate must not leave a previous final looking like
         # the result of the current refinement attempt. The old finals are
@@ -651,6 +687,7 @@ def refine_with_llm(
             model=model,
             api_kind=api_kind,
             chunk_chars=min(max_chars, 12000),
+            trace_dir=trace_dir,
         )
     else:
         prompt = build_llm_prompt(
@@ -663,7 +700,7 @@ def refine_with_llm(
             draft_summary=draft_summary,
             content_type=content_type,
         )
-        refined = call_llm(prompt, model=model, api_kind=api_kind)
+        refined = _call_and_trace(prompt, model=model, api_kind=api_kind, trace_dir=trace_dir)
 
     final_summary = _prepare_final_summary(refined, source) if isinstance(refined, str) else refined
     _validate_final_summary(final_summary, transcript)
