@@ -117,8 +117,37 @@ def _remove_local_parent_paths(summary: str, source: str) -> str:
     return sanitized
 
 
+def _strip_outer_code_fence(summary: str) -> str:
+    """移除包裹整个 LLM 响应的通用代码围栏（``` 或 ```markdown），保留内部正文。"""
+    text = summary.strip()
+    if not text.startswith("```"):
+        return text
+    match = re.match(r"^```[^\r\n]*\r?\n", text)
+    if not match:
+        return text
+    language = match.group(0).strip("` \t\r\n").strip().lower()
+    if language.startswith("mermaid"):
+        return text
+    if not text.rstrip().endswith("```"):
+        return text
+    return text[match.end():-3].strip()
+
+
+def _strip_leading_reasoning(summary: str) -> str:
+    """丢弃第一个 Markdown 标题之前的思维链文本，避免推理痕迹混入最终稿。"""
+    lines = summary.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^#{1,6}\s+\S", line):
+            if index > 0 and any(line.strip() for line in lines[:index]):
+                return "\n".join(lines[index:]).strip()
+            break
+    return summary.strip()
+
+
 def _prepare_final_summary(summary: str, source: str) -> str:
-    final_summary = _remove_local_parent_paths(summary.strip(), source)
+    final_summary = _strip_outer_code_fence(summary)
+    final_summary = _strip_leading_reasoning(final_summary)
+    final_summary = _remove_local_parent_paths(final_summary, source)
     final_summary = _remove_transcript_sections(final_summary)
     if is_document_source(source):
         final_summary = re.sub(
@@ -505,11 +534,16 @@ def parse_llm_text(data: dict[str, Any], api_kind: str) -> str:
             if not isinstance(item, dict):
                 continue
             for content in item.get("content", []) or []:
-                if isinstance(content, dict):
-                    if isinstance(content.get("text"), str):
-                        chunks.append(content["text"])
-                    elif isinstance(content.get("output_text"), str):
-                        chunks.append(content["output_text"])
+                if not isinstance(content, dict):
+                    continue
+                content_type = str(content.get("type") or "")
+                # 推理模型会把思维链放在 reasoning_text 项，正文才是最终交付。
+                if content_type == "reasoning_text":
+                    continue
+                if isinstance(content.get("output_text"), str):
+                    chunks.append(content["output_text"])
+                elif isinstance(content.get("text"), str):
+                    chunks.append(content["text"])
         if chunks:
             return "\n".join(chunks)
     fail("无法解析 LLM 返回结果。")
