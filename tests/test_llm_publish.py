@@ -524,6 +524,35 @@ mindmap
             with self.subTest(response=response):
                 self._assert_invalid_refinement_is_not_published(response)
 
+    def test_slash_separator_between_words_is_not_rejected_as_path(self) -> None:
+        refined = """# 精校摘要
+
+## 核心结论
+相对控股 / 绝对控股的分界是市占率 30% 与 50%，竞争格局比行业增速更重要。
+
+## 实践建议
+先验证关键假设，再小范围测试。
+""".strip()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
+                llm, "call_llm", return_value=refined
+            ):
+                llm.refine_with_llm(
+                    {"title": "测试视频", "uploader": "作者", "duration": 90},
+                    "https://example.test/video",
+                    out_dir,
+                    "这是用于校验最终稿质量的原始逐字稿，内容足够长，用于验证斜杠分隔词不会被误判为本机路径。",
+                    "zh",
+                    "gpt-test",
+                    "responses",
+                    12000,
+                    "video",
+                )
+
+            self.assertEqual((out_dir / "summary.md").read_text(encoding="utf-8"), refined + "\n")
+
     def test_any_windows_or_unix_absolute_path_is_rejected_before_publish(self) -> None:
         paths = (
             "/secret",
