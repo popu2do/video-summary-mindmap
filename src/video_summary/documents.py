@@ -20,6 +20,10 @@ def extract_document_text(path: Path) -> str:
             fail(f"读取 PDF 需要安装 pypdf：python -m pip install pypdf（文件：{display_name}）")
         try:
             reader = PdfReader(str(path))
+            if reader.is_encrypted:
+                # 常见的加水印 PDF 使用空密码，尝试解密以便提取文本层；
+                # 解密失败时后续 extract_text 会抛出异常并落入统一错误分支。
+                reader.decrypt("")
             text = "\n".join(page.extract_text() or "" for page in reader.pages)
         except Exception:
             fail(f"PDF 文件损坏或无法读取：{display_name}")
